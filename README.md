@@ -37,7 +37,7 @@ Thousands of trades are sent to a single store. The store must organize and stor
 
 ## Architecture
 
-Trades are ingested primarily through Kafka, partitioned by trade id. A rate-limited, authenticated REST endpoint (`POST /trades`) is available as a backup when Kafka is unavailable and for direct ingestion. Both paths are thin adapters over one Spring Boot processing service, which applies the validation rules, guarantees idempotency and is the only writer of trade state.
+Trades are ingested primarily through Kafka, partitioned by trade id. A rate-limited, authenticated REST endpoint (`POST /api/v1/trades`) is available as a backup when Kafka is unavailable and for direct ingestion. Both paths are thin adapters over one Spring Boot processing service, which applies the validation rules, guarantees idempotency and is the only writer of trade state.
 
 PostgreSQL holds the authoritative trade state. State changes and their events are committed together through a transactional outbox, and an outbox relay delivers the events to MongoDB (trade history and projections) and Kafka (status events). An expiry scheduler marks matured trades as expired. Read-only, paginated REST endpoints expose stored trades and their history.
 
@@ -57,16 +57,20 @@ See [docs/architecture.md](docs/architecture.md) for details and PlantUML diagra
 
 ## Build and Test
 
-Prerequisites: JDK 17 and Maven.
+Prerequisites: JDK 21, Maven 3.9+, and Docker (for integration tests).
 
-```shell
-mvn -f pom.xml clean install
-```
+Tech stack: Spring Boot 4.1, Kafka, PostgreSQL (Flyway), MongoDB, ShedLock, JUnit 5, Mockito, Testcontainers.
 
-Run tests only:
+Run unit tests (`*Test`, no external services needed):
 
 ```shell
 mvn -f pom.xml test
+```
+
+Run unit and integration tests (`*IT`, starts PostgreSQL, MongoDB and Kafka with Testcontainers):
+
+```shell
+mvn -f pom.xml verify
 ```
 
 ## License

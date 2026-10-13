@@ -8,7 +8,7 @@ participant "Trade Ingestion API" as api
 participant "Trade Processing Service" as processing
 database "PostgreSQL" as postgres
 
-producer -> security : POST /trades\n(Bearer token, optional Idempotency-Key)
+producer -> security : POST /api/v1/trades\n(Bearer token, optional Idempotency-Key)
 alt missing or invalid token / scope
   security --> producer : 401 Unauthorized / 403 Forbidden
 else authenticated (trades:write)

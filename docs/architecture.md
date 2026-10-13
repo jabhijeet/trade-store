@@ -14,12 +14,12 @@ Producers ──► Kafka ──► Trade Consumer ──┐                    
              (trades,                    ├──► Trade Processing Service ──► PostgreSQL ◄── Expiry Scheduler │
               key = trade id)            │    (validation rules,           (trades,         (ShedLock)     │
 Producers ──► Rate Limiter ──► POST ─────┘     version check,               processed_message,             │
-             (per client, 429)  /trades         idempotency)                outbox_event)                  │
+             (per client, 429)  /api/v1/trades  idempotency)                outbox_event)                  │
                                                                                  │                         │
                                                                            Outbox Relay ──► MongoDB         │
                                                                                  └────────► Kafka           │
                                                                                             (trade-status)  │
-Clients ──► GET /trades ... ──► Trade Query API ──► PostgreSQL (current) / MongoDB (history)              │
+Clients ──► GET /api/v1/trades ... ──► Trade Query API ──► PostgreSQL (current) / MongoDB (history)       │
                     └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -41,7 +41,7 @@ The PlantUML source for every diagram lives in [`diagrams/`](diagrams):
 Upstream systems that send trades to the store:
 
 - **normally** by publishing to the Kafka `trades` topic, using the trade id as the message key;
-- **as a fallback** by calling `POST /trades` when Kafka is unavailable, or when the producer can only integrate over HTTP.
+- **as a fallback** by calling `POST /api/v1/trades` when Kafka is unavailable, or when the producer can only integrate over HTTP.
 
 ### 2.2 Kafka – Primary Ingestion
 
@@ -58,7 +58,7 @@ A thin adapter. It deserializes the message (`ErrorHandlingDeserializer`), build
 
 ### 2.4 Trade Ingestion API (REST adapter, backup / direct)
 
-`POST /trades` – a thin adapter over the same processing service, so every rule is applied identically on both paths. Because its purpose is to work when Kafka is down, it writes through the processing service directly and does **not** depend on Kafka.
+`POST /api/v1/trades` – a thin adapter over the same processing service, so every rule is applied identically on both paths. Because its purpose is to work when Kafka is down, it writes through the processing service directly and does **not** depend on Kafka.
 
 | Outcome | HTTP status |
 |---------|-------------|
@@ -121,13 +121,13 @@ Because the events are written in the same transaction as the update, a crash ca
 
 | Endpoint | Source |
 |----------|--------|
-| `GET /trades?bookId=&counterPartyId=&expired=&page=&size=` | PostgreSQL, paginated and filtered |
-| `GET /trades/{tradeId}` | PostgreSQL, current version |
-| `GET /trades/{tradeId}/history` | MongoDB, all events of the trade, paginated |
+| `GET /api/v1/trades?bookId=&counterPartyId=&expired=&page=&size=` | PostgreSQL, paginated and filtered |
+| `GET /api/v1/trades/{tradeId}` | PostgreSQL, current version |
+| `GET /api/v1/trades/{tradeId}/history` | MongoDB, all events of the trade, paginated |
 
 ### 2.11 Security
 
-- **REST** – OAuth2 resource server with JWT bearer tokens. `POST /trades` requires the `trades:write` scope; read endpoints require `trades:read`. Request bodies are validated with Bean Validation and limited in size.
+- **REST** – OAuth2 resource server with JWT bearer tokens. `POST /api/v1/trades` requires the `trades:write` scope; read endpoints require `trades:read`. Request bodies are validated with Bean Validation and limited in size.
 - **Kafka** – `SASL_SSL` authentication and topic ACLs: producers may only write to `trades`; the application may read `trades` and write `trade-status` and the dead-letter topic.
 - **Secrets** – credentials are supplied through environment variables or a secrets manager and never committed to the repository.
 
@@ -187,7 +187,7 @@ Together they represent the sample table: current state plus history. Trades suc
 
 ### REST (backup / direct)
 
-1. A producer calls `POST /trades` with a JWT and, optionally, an `Idempotency-Key`.
+1. A producer calls `POST /api/v1/trades` with a JWT and, optionally, an `Idempotency-Key`.
 2. The rate limiter admits the request or rejects it with `429`.
 3. The request body is validated; a malformed request is rejected with `400`.
 4. The processing service runs the steps in §2.5.
