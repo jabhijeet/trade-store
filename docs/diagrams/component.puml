@@ -1,0 +1,46 @@
+@startuml component
+title Trade Store - Component View
+
+actor "Trade Producers" as producers
+actor "Clients" as clients
+
+queue "Kafka\n(trades topic,\nkey = trade id)" as kafka
+queue "Kafka\n(trades dead-letter topic)" as dlt
+queue "Kafka\n(trade-status topic)" as statusTopic
+
+node "Spring Boot Trade Store App" as app {
+  component "Security\n(OAuth2 JWT)" as security
+  component "Rate Limiter\n(Bucket4j, per client)" as rateLimiter
+  component "Trade Ingestion API\nPOST /trades\n(backup / direct)" as ingestionApi
+  component "Trade Consumer\n(primary ingestion)" as consumer
+  component "Trade Processing Service\n(idempotency, validation rules,\nversion check, outbox write)" as processing
+  component "Validation Rules\n(MaturityDateRule, VersionRule, ...)" as rules
+  component "Expiry Scheduler\n(ShedLock)" as scheduler
+  component "Outbox Relay\n(ShedLock)" as relay
+  component "Trade Query API\n(read only, paginated)" as queryApi
+  component "Monitoring\n(Actuator, Micrometer)" as monitoring
+}
+
+database "PostgreSQL\n(trades, processed_message,\noutbox_event, shedlock)" as postgres
+database "MongoDB\n(trade_events, projections)" as mongo
+
+producers --> kafka : publish trades (primary)
+producers --> security : POST /trades (backup / direct)
+security --> rateLimiter
+rateLimiter --> ingestionApi : admitted requests
+kafka --> consumer : ordered per partition
+consumer --> dlt : poison messages
+consumer --> processing
+ingestionApi --> processing
+processing --> rules
+processing --> postgres : state + idempotency + outbox\n(one transaction)
+scheduler --> postgres : mark expired + outbox\n(one transaction)
+relay --> postgres : read undelivered events
+relay --> mongo : upsert events, update projections
+relay --> statusTopic : trade expired events
+clients --> security : GET /trades ...
+security --> queryApi
+queryApi --> postgres : current trades
+queryApi --> mongo : history / projections
+monitoring ..> app : observes
+@enduml

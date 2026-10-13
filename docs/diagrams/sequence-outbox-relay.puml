@@ -1,0 +1,28 @@
+@startuml sequence-outbox-relay
+title Trade Store - Outbox Relay
+
+participant "Outbox Relay" as relay
+participant "ShedLock" as shedlock
+database "PostgreSQL\n(outbox_event)" as postgres
+database "MongoDB" as mongo
+queue "Kafka (trade-status)" as statusTopic
+
+relay -> shedlock : acquire lock "outbox-relay"
+alt lock held by another instance
+  shedlock --> relay : skip poll
+else lock acquired
+  relay -> postgres : select undelivered events\norder by created_at limit batch
+  loop for each event
+    alt not yet delivered to MongoDB
+      relay -> mongo : upsert trade_events (_id = event id)\nupdate projections
+      relay -> postgres : set mongo_delivered_at
+    end
+    alt EXPIRED event not yet delivered to Kafka
+      relay -> statusTopic : publish (key = tradeId)
+      relay -> postgres : set kafka_delivered_at
+    end
+  end
+  note right of relay : a failed delivery leaves its column null\nand is retried on the next poll;\nupserts by event id make retries idempotent
+  relay -> shedlock : release lock
+end
+@enduml

@@ -1,0 +1,26 @@
+@startuml sequence-expiry
+title Trade Store - Trade Expiry
+
+participant "Expiry Scheduler" as scheduler
+participant "ShedLock" as shedlock
+participant "Clock\n(business time zone)" as clock
+database "PostgreSQL" as postgres
+participant "Monitoring" as monitoring
+
+scheduler -> shedlock : acquire lock "expire-trades"
+alt lock held by another instance
+  shedlock --> scheduler : skip run
+else lock acquired
+  scheduler -> clock : today
+  loop until no matured trades remain (fixed-size batches)
+    scheduler -> postgres : BEGIN
+    scheduler -> postgres : UPDATE trades SET expired = true\nWHERE expired = false AND maturity_date < today\n(batch) RETURNING trade_id, version
+    scheduler -> postgres : insert outbox_event (EXPIRED) per returned row
+    scheduler -> postgres : COMMIT
+  end
+  scheduler -> monitoring : record expired trade count
+  scheduler -> shedlock : release lock
+end
+
+note over postgres : the outbox relay delivers EXPIRED events\nto MongoDB and the trade-status topic
+@enduml

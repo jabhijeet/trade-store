@@ -1,0 +1,48 @@
+@startuml sequence-rest-ingestion
+title Trade Store - REST Ingestion (backup / direct)
+
+actor "Trade Producer" as producer
+participant "Security\n(OAuth2 JWT)" as security
+participant "Rate Limiter\n(per client)" as rateLimiter
+participant "Trade Ingestion API" as api
+participant "Trade Processing Service" as processing
+database "PostgreSQL" as postgres
+
+producer -> security : POST /trades\n(Bearer token, optional Idempotency-Key)
+alt missing or invalid token / scope
+  security --> producer : 401 Unauthorized / 403 Forbidden
+else authenticated (trades:write)
+  security -> rateLimiter : request
+  alt client bucket empty
+    rateLimiter --> producer : 429 Too Many Requests (Retry-After)
+  else token available
+    rateLimiter -> api : request
+    alt malformed body
+      api --> producer : 400 Bad Request
+    else valid body
+      api -> processing : process(command, messageId = rest:<Idempotency-Key>)
+      note right of processing : same steps as the Kafka path:\nidempotency, row lock, validation rules,\nstate + outbox in one transaction
+      processing -> postgres : transaction
+      alt duplicate Idempotency-Key
+        processing --> api : recorded outcome
+        api --> producer : original status
+      else CREATED
+        processing --> api : CREATED
+        api --> producer : 201 Created
+      else UPDATED or REPLACED
+        processing --> api : UPDATED / REPLACED
+        api --> producer : 200 OK
+      else LowerVersionTradeException
+        processing --> api : exception (rejection recorded)
+        api --> producer : 409 Conflict
+      else MaturityDateInPastException
+        processing --> api : exception (rejection recorded)
+        api --> producer : 422 Unprocessable Entity
+      else database unavailable
+        processing --> api : transient exception
+        api --> producer : 503 Service Unavailable
+      end
+    end
+  end
+end
+@enduml
