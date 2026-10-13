@@ -2,8 +2,11 @@ package com.tradestore.service;
 
 import com.tradestore.domain.EventSource;
 import com.tradestore.domain.TradeEventType;
+import com.tradestore.persistence.sql.OutboxEventEntity;
 import com.tradestore.persistence.sql.OutboxEventRepository;
 import java.time.Clock;
+import java.time.Instant;
+import java.util.UUID;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
@@ -26,6 +29,8 @@ public class OutboxWriter {
      */
     public void append(String tradeId, int version, TradeEventType type, EventSource source, String reason,
                        Object payload) {
-        throw new UnsupportedOperationException("Not implemented yet");
+        var event = new OutboxEventEntity(UUID.randomUUID(), tradeId, version, type, source, reason,
+                jsonMapper.writeValueAsString(payload), Instant.now(clock), null, null);
+        outboxEventRepository.save(event);
     }
 }

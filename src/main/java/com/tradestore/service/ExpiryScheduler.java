@@ -1,6 +1,7 @@
 package com.tradestore.service;
 
 import java.time.Clock;
+import java.time.LocalDate;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
@@ -31,6 +32,13 @@ public class ExpiryScheduler {
      * @return the total number of trades expired
      */
     public int expireMaturedTrades() {
-        throw new UnsupportedOperationException("Not implemented yet");
+        LocalDate today = LocalDate.now(clock);
+        int total = 0;
+        int expiredInBatch;
+        do {
+            expiredInBatch = tradeExpiryService.expireNextBatch(today);
+            total += expiredInBatch;
+        } while (expiredInBatch > 0);
+        return total;
     }
 }

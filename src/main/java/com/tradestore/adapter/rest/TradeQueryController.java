@@ -1,5 +1,6 @@
 package com.tradestore.adapter.rest;
 
+import com.tradestore.domain.TradeFilter;
 import com.tradestore.service.TradeQueryService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Pageable;
@@ -26,18 +27,21 @@ public class TradeQueryController {
             @RequestParam(required = false) String counterPartyId,
             @RequestParam(required = false) Boolean expired,
             @PageableDefault(size = 50, sort = "tradeId") Pageable pageable) {
-        throw new UnsupportedOperationException("Not implemented yet");
+        var filter = new TradeFilter(bookId, counterPartyId, expired);
+        return PageResponse.from(tradeQueryService.findTrades(filter, pageable), TradeResponse::from);
     }
 
     @GetMapping("/{tradeId}")
     public TradeResponse getTrade(@PathVariable String tradeId) {
-        throw new UnsupportedOperationException("Not implemented yet");
+        return tradeQueryService.findTrade(tradeId)
+                .map(TradeResponse::from)
+                .orElseThrow(() -> new TradeNotFoundException(tradeId));
     }
 
     @GetMapping("/{tradeId}/history")
     public PageResponse<TradeEventResponse> getTradeHistory(
             @PathVariable String tradeId,
             @PageableDefault(size = 50) Pageable pageable) {
-        throw new UnsupportedOperationException("Not implemented yet");
+        return PageResponse.from(tradeQueryService.findHistory(tradeId, pageable), TradeEventResponse::from);
     }
 }

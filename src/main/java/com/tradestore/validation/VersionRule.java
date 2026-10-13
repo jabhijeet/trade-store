@@ -1,6 +1,7 @@
 package com.tradestore.validation;
 
 import com.tradestore.domain.IncomingTrade;
+import com.tradestore.domain.LowerVersionTradeException;
 import com.tradestore.domain.Trade;
 import java.time.LocalDate;
 import java.util.Optional;
@@ -16,6 +17,9 @@ public class VersionRule implements TradeValidationRule {
 
     @Override
     public void validate(IncomingTrade incoming, Optional<Trade> current, LocalDate today) {
-        throw new UnsupportedOperationException("Not implemented yet");
+        current.filter(stored -> incoming.version() < stored.version())
+                .ifPresent(stored -> {
+                    throw new LowerVersionTradeException(incoming.tradeId(), incoming.version(), stored.version());
+                });
     }
 }

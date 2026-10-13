@@ -1,8 +1,12 @@
 package com.tradestore.service;
 
 import com.tradestore.config.TradeStoreProperties;
+import com.tradestore.domain.EventSource;
+import com.tradestore.domain.Trade;
+import com.tradestore.domain.TradeEventType;
 import com.tradestore.persistence.sql.TradeExpiryRepository;
 import java.time.LocalDate;
+import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,6 +27,9 @@ public class TradeExpiryService {
      */
     @Transactional
     public int expireNextBatch(LocalDate today) {
-        throw new UnsupportedOperationException("Not implemented yet");
+        List<Trade> expired = tradeExpiryRepository.expireMaturedTrades(today, properties.expiry().batchSize());
+        expired.forEach(trade -> outboxWriter.append(trade.tradeId(), trade.version(), TradeEventType.EXPIRED,
+                EventSource.SCHEDULER, null, trade));
+        return expired.size();
     }
 }

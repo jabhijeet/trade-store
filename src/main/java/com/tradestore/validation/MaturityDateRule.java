@@ -1,6 +1,7 @@
 package com.tradestore.validation;
 
 import com.tradestore.domain.IncomingTrade;
+import com.tradestore.domain.MaturityDateInPastException;
 import com.tradestore.domain.Trade;
 import java.time.LocalDate;
 import java.util.Optional;
@@ -16,6 +17,9 @@ public class MaturityDateRule implements TradeValidationRule {
 
     @Override
     public void validate(IncomingTrade incoming, Optional<Trade> current, LocalDate today) {
-        throw new UnsupportedOperationException("Not implemented yet");
+        if (incoming.maturityDate().isBefore(today)) {
+            throw new MaturityDateInPastException(
+                    incoming.tradeId(), incoming.version(), incoming.maturityDate(), today);
+        }
     }
 }
