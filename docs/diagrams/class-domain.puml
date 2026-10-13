@@ -1,0 +1,132 @@
+@startuml class-domain
+title Trade Store - Domain Model
+
+package "domain" {
+  class Trade {
+    tradeId : String
+    version : int
+    counterPartyId : String
+    bookId : String
+    maturityDate : LocalDate
+    createdDate : LocalDate
+    expired : boolean
+  }
+
+  class TradeCommand {
+    messageId : String
+    source : EventSource
+    trade : Trade
+  }
+
+  class TradeEvent {
+    id : UUID
+    tradeId : String
+    version : int
+    type : TradeEventType
+    source : EventSource
+    reason : String
+    occurredAt : Instant
+    payload : Trade
+  }
+
+  enum TradeEventType {
+    CREATED
+    UPDATED
+    REPLACED
+    REJECTED
+    EXPIRED
+  }
+
+  enum EventSource {
+    KAFKA
+    REST
+    SCHEDULER
+  }
+
+  enum SaveOutcome {
+    CREATED
+    UPDATED
+    REPLACED
+  }
+
+  abstract class TradeRejectedException
+  class LowerVersionTradeException
+  class MaturityDateInPastException
+}
+
+package "validation" {
+  interface TradeValidationRule {
+    validate(incoming : Trade, current : Optional<Trade>, today : LocalDate)
+  }
+  class MaturityDateRule
+  class VersionRule
+}
+
+package "service" {
+  class TradeProcessingService {
+    process(command : TradeCommand) : SaveOutcome
+  }
+  class ExpiryScheduler <<ShedLock>> {
+    expireMaturedTrades()
+  }
+  class OutboxRelay <<ShedLock>> {
+    deliverPendingEvents()
+  }
+}
+
+package "adapters" {
+  class TradeConsumer <<Kafka>> {
+    onTrade(record : ConsumerRecord)
+  }
+  class TradeIngestionController <<REST, rate limited>> {
+    ingestTrade(trade : Trade, idempotencyKey : String) : ResponseEntity
+  }
+  class TradeQueryController <<REST, read only>> {
+    getTrades(filter : TradeFilter, page : Pageable) : Page<Trade>
+    getTrade(tradeId : String) : Trade
+    getTradeHistory(tradeId : String, page : Pageable) : Page<TradeEvent>
+  }
+  class RestExceptionHandler <<ControllerAdvice>> {
+    maps exceptions to 400 / 409 / 422 / 503
+  }
+}
+
+package "persistence" {
+  interface TradeRepository <<PostgreSQL>>
+  interface ProcessedMessageRepository <<PostgreSQL>>
+  interface OutboxEventRepository <<PostgreSQL>>
+  interface TradeEventRepository <<MongoDB>>
+}
+
+class "java.time.Clock" as Clock
+
+TradeRejectedException <|-- LowerVersionTradeException
+TradeRejectedException <|-- MaturityDateInPastException
+TradeValidationRule <|.. MaturityDateRule
+TradeValidationRule <|.. VersionRule
+MaturityDateRule ..> MaturityDateInPastException : throws
+VersionRule ..> LowerVersionTradeException : throws
+
+TradeCommand --> Trade
+TradeCommand --> EventSource
+TradeEvent --> TradeEventType
+TradeEvent --> EventSource
+TradeEvent --> Trade
+
+TradeConsumer --> TradeProcessingService
+TradeIngestionController --> TradeProcessingService
+TradeProcessingService --> "*" TradeValidationRule
+TradeProcessingService --> TradeRepository
+TradeProcessingService --> ProcessedMessageRepository
+TradeProcessingService --> OutboxEventRepository
+TradeProcessingService --> Clock
+TradeProcessingService ..> SaveOutcome
+ExpiryScheduler --> TradeRepository
+ExpiryScheduler --> OutboxEventRepository
+ExpiryScheduler --> Clock
+OutboxRelay --> OutboxEventRepository
+OutboxRelay --> TradeEventRepository
+TradeQueryController --> TradeRepository
+TradeQueryController --> TradeEventRepository
+RestExceptionHandler ..> TradeRejectedException : handles
+@enduml
