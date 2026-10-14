@@ -22,10 +22,10 @@ jobs:
 
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Java 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
@@ -39,7 +39,7 @@ jobs:
 
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: junit-test-reports
           path: |
@@ -51,34 +51,62 @@ jobs:
   dependency-security:
     name: OSS dependency vulnerability scan
     runs-on: ubuntu-latest
+    env:
+      DEPENDENCY_CHECK_VERSION: 13.0.0
 
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Java 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
           cache: maven
+
+      # The NVD database is large; downloading it from scratch on every run is slow and rate-limited. One cache
+      # entry is saved per day, and each run restores the newest entry and only fetches the changes since then.
+      # The database lives in ~/.dependency-check-data, outside ~/.m2, so it is cached independently of the
+      # Maven dependency cache.
+      - name: Compute vulnerability database cache key
+        id: nvd-cache-key
+        run: echo "key=dependency-check-${DEPENDENCY_CHECK_VERSION}-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vulnerability database
+        id: nvd-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.dependency-check-data
+          key: ${{ steps.nvd-cache-key.outputs.key }}
+          restore-keys: dependency-check-${{ env.DEPENDENCY_CHECK_VERSION }}-
 
       - name: Scan dependencies with OWASP Dependency-Check
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
           mvn --batch-mode --no-transfer-progress \
-            org.owasp:dependency-check-maven:12.1.0:check \
+            org.owasp:dependency-check-maven:${DEPENDENCY_CHECK_VERSION}:check \
             -DnvdApiKeyEnvironmentVariable=NVD_API_KEY \
+            -DdataDirectory="$HOME/.dependency-check-data" \
+            -Dformats=HTML,JSON \
             -DfailBuildOnCVSS=9.0
+
+      # Saved even when the scan fails on a vulnerability, so the next run does not download the database again.
+      - name: Save vulnerability database
+        if: always() && steps.nvd-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.dependency-check-data
+          key: ${{ steps.nvd-cache-key.outputs.key }}
 
       - name: Upload vulnerability report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dependency-vulnerability-report
           path: |
-            **/target/dependency-check-report.html
-            **/target/dependency-check-report.json
-          if-no-files-found: ignore
+            target/dependency-check-report.html
+            target/dependency-check-report.json
+          if-no-files-found: warn
           retention-days: 14
