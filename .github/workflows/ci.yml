@@ -3,9 +3,13 @@ name: TradeStore CI
 
 on:
   push:
-    branches: [main, develop]
+    branches:
+      - main
+      - develop
   pull_request:
-    branches: [main, develop]
+    branches:
+      - main
+      - develop
   workflow_dispatch:
 
 permissions:
@@ -26,6 +30,9 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
+
+      - name: Verify Docker availability
+        run: docker info
 
       - name: Compile and run tests
         run: mvn --batch-mode --no-transfer-progress clean verify
@@ -62,8 +69,8 @@ jobs:
         run: |
           mvn --batch-mode --no-transfer-progress \
             org.owasp:dependency-check-maven:12.1.0:check \
-            -DfailBuildOnCVSS=9.0 \
-            -DnvdApiKey="$NVD_API_KEY"
+            -DnvdApiKeyEnvironmentVariable=NVD_API_KEY \
+            -DfailBuildOnCVSS=9.0
 
       - name: Upload vulnerability report
         if: always()
