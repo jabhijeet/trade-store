@@ -1,57 +1,596 @@
 # AI Prompts
 
-The assignment asks that every prompt given to an AI tool is shared in a separate document. This is that document.
+**Project:** TradeStore
 
-**Tool used:** Claude Code (Anthropic), working in this repository. The AI wrote code, tests, diagrams and documentation in response to the prompts below; all commits were made by hand.
+**Purpose:** Record the prompts used to obtain AI assistance while developing the assignment. The assignment asks that
+every prompt given to an AI tool is shared in a separate document; this is that document.
 
-## How this document is maintained
+**Approach:** Test-driven development (Red, Green, Refactor).
 
-- Prompts are copied verbatim, in the order they were given, grouped by working session.
-- Each session lists the date and the outcome, so a prompt can be matched to the commits it produced.
-- Claude Code can export a session's transcript with the `/export` command, which is the source for the prompts below.
+**Tool used:** Claude Code (Anthropic), working in this repository. The AI wrote code, tests, diagrams and documentation in response to the prompts below. Every change was reviewed before it was committed; `e27bace` and `e74ba75` were committed and pushed by the AI on request.
 
-## Sessions
+## Project system prompt
 
-### Earlier sessions (13–14 October 2026): design, implementation, CI and fixes
-
-> **To complete:** paste the prompts from the earlier sessions here, in order. They were not exported automatically
-> (the transcripts are stored locally by Claude Code under `~/.claude/projects/`), so they have to be copied from each
-> session's `/export` output.
-
-Outcome, by commit:
-
-| Commit | Summary |
-|--------|---------|
-| `fa8f228` | Liquibase migrations, connection pools, compose stack and UTC clock |
-| `6338562` | OWASP scan fix |
-| `7479e1c` | Dependency-Check 13.0.0 with a cached NVD database |
-| `886659d` | Outbox relay backlog, concurrent first insert and rejection connections |
-| `e8374dd` | Patched vulnerable dependencies and a faster OWASP scan |
-
-Prompts:
+The standing context for every prompt below: the role the AI plays, what is being built, and the rules that apply
+to all work in this repository. 
 
 ```text
-<paste prompts here>
+Role:
+I am the enterprise architect accountable for TradeStore. You are my senior engineering partner: a Java and Spring
+specialist who designs for production, writes the code and tests, and reviews your own output as critically as a
+second architect would. Challenge my assumptions, surface trade-offs explicitly, and flag ambiguity in the brief
+instead of resolving it silently.
+
+Business problem:
+TradeStore ingests thousands of trades from any transmission channel, validates them and persists each trade in
+sequence by trade id and version.
+- Trade attributes: Trade Id, Version, Counter-Party Id, Book-Id, Maturity Date, Created Date, Expired (Y/N).
+- Rule 1 (versioning): a lower version than the stored one is rejected with an exception; the same version
+  replaces the stored record.
+- Rule 2 (maturity): a trade whose maturity date is earlier than today is rejected.
+- Rule 3 (expiry): a stored trade is flagged expired automatically once its maturity date has passed.
+
+Target architecture and platform:
+- Java 21, Spring Boot 4.1, Maven.
+- Kafka as the primary, event-driven ingestion channel, partitioned by trade id for per-trade ordering.
+- REST (/api/v1/trades) as a secured, rate-limited fallback channel.
+- PostgreSQL as the system of record; MongoDB as the NoSQL store for audit history and read-optimised views.
+- Transactional outbox for consistency across stores and topics; no dual writes.
+- GitHub Actions CI with regression tests and an OWASP dependency gate that fails on CVSS 9.0 and above.
+- PlantUML as the architecture-as-code notation, versioned with the source.
+
+Non-functional priorities, in order:
+Correctness of the version invariant under retries and concurrency; data consistency across stores; resilience to
+a downstream outage; security of every external entry point; operability (metrics, structured logs); and delivery
+speed last.
+
+Engineering standards:
+- TDD: write the test first, confirm it fails for the right reason, implement the minimum, then refactor green.
+  Never weaken a test to make it pass.
+- Business rules live in one processing service so every channel behaves identically.
+- All date decisions use an injectable Clock in UTC.
+- Prove behaviour with unit tests and Testcontainers integration tests against real PostgreSQL, MongoDB and Kafka.
+- Remediate vulnerabilities by upgrading; suppress only evidenced false positives, documented, with an expiry date.
+- Evidence over assertion: claim something works only when a test run or command output shows it.
+- Code, README, docs/architecture.md and diagrams change together.
+- Do not add requirements beyond the brief; record assumptions and decisions separately.
+- Do not run git commands unless I explicitly ask; I review every change before it is committed.
 ```
 
-### Session 6 (14 October 2026): requirement check, AI prompts document and remaining features
+## Approach: test-driven development
 
-Outcome: checked the repository against the assignment, added this document, added an end-to-end test of the sample table, and implemented the features the architecture listed as planned (OAuth2/JWT security, per-client rate limiting and request size limits, the MongoDB `trade_views` projection, the `processed_message` purge job, application metrics, structured JSON logs and the Kafka SASL_SSL profile).
+The commit history shows the Red, Green, Refactor cycle:
 
-Prompt 1 (the assignment document was attached as a file path):
+1. **Red** (`9121127`): the application skeleton was created with stub classes, and unit and integration tests were
+   written for every business rule before any logic existed. The tests failed.
+2. **Green** (`e404f51`): the validation rules, processing service, outbox, expiry, Kafka consumer and REST controllers
+   were implemented until all 48 unit tests passed.
+3. **Refactor and harden** (`fa8f228` onwards): each later change kept the suite green and added a regression test for
+   the problem it fixed (outbox backlog, concurrent first insert, single-connection rejection, sample table).
+
+AI suggestions were not taken as proof that code worked. The tests were run locally and in GitHub Actions, and the
+OWASP reports were read before any dependency was patched or any finding suppressed.
+
+## Prompts by commit
+
+### 13 October 2026
+
+#### `4bb50eb` chore: initial Maven project setup
+
+Done manually, without AI: the Maven project skeleton was generated by running the Maven archetype command. Claude
+Code took over from that point.
 
 ```text
-"C:\Users\joshi\Desktop\Trade Assignment - For Architect Lead role.docx"
+Context:
+I have generated the project baseline myself with the Maven archetype. You take ownership from here.
+
+Ask:
+Establish repository hygiene before any code lands. Update .gitignore so Maven build output (target/), IDE metadata
+(.idea/, *.iml, .vscode/) and local AI tooling configuration (.claude/, CLAUDE.md, CLAUDE.local.md, .mcp.json) can
+never be committed.
+
+Expected outcome:
+A repository that tracks source only; no local or AI tooling configuration ever reaches version control.
 ```
 
-Prompt 2:
+#### `108d0e7` docs: add architecture design and PlantUML diagrams
+
+Prompt 1: requirements baseline
 
 ```text
-do all 3 steps and then we also need to add rate limitor and other remaining implementations mentioned in readme, and other docs
+Context:
+The assignment brief is attached. It describes a store receiving thousands of trades that must be persisted in
+sequence by trade id and version. This baseline is what the solution will be assessed against.
+
+Ask:
+Produce the requirements baseline in the README: problem statement, trade attributes, the sample data set, the
+three business rules, and the technical requirements as a traceable checklist. Stay strictly within the brief.
+Where it is ambiguous, list the open points separately with a proposed assumption for me to approve.
+
+Example:
+"T2 version 1 arrives after T2 version 2" must be rejected with an exception; "T3 with maturity 20/05/2014" must
+end up with Expired = Y.
+
+Expected outcome:
+A single source of truth for scope that every later design decision and test can be traced back to.
 ```
 
-The "3 steps" were proposed by the AI in its answer to prompt 1:
+Prompt 2: target architecture
 
-1. create this AI prompts document;
-2. run the full test suite (`mvn verify`) to confirm everything passes;
-3. check each row of the assignment's sample table with a test.
+```text
+Context:
+The brief mandates a streaming platform and both a SQL and a NoSQL store. Trade volume is high and the same trade
+can be amended many times, so ordering and consistency are the primary architectural risks.
+
+Ask:
+Propose the target architecture. Kafka is the primary ingestion channel, partitioned by trade id to preserve
+per-trade ordering. PostgreSQL is the system of record for current trade state. MongoDB holds the audit history.
+Give each store a single, justified responsibility, and define how consistency is guaranteed when the PostgreSQL
+commit succeeds but the MongoDB or Kafka write fails. Present the options you rejected and why.
+
+Expected outcome:
+An architecture with clear data ownership, no dual writes, and an explicit consistency mechanism, with the
+trade-offs recorded.
+```
+
+Prompt 3: architecture documentation
+
+```text
+Context:
+Architecture must be reviewable and versioned with the code; the brief asks for PlantUML diagrams where feasible.
+
+Ask:
+Capture the design in docs/architecture.md and model it as code in PlantUML: a component view, sequence views for
+Kafka ingestion and the outbox relay, and a class view of the domain.
+
+Expected outcome:
+docs/architecture.md and docs/diagrams/*.puml that serve as the blueprint the implementation will be held to.
+```
+
+Prompt 4: fallback channel and processing core
+
+```text
+Context:
+Kafka can be unavailable, and it guarantees at-least-once delivery, so duplicates are expected rather than
+exceptional.
+
+Ask:
+Extend the design with a REST fallback channel that is authenticated and rate limited. Both channels must be thin
+adapters over one processing service, which is the single writer of trade state. Make the validation rules a
+pluggable strategy so new rules need no change to the service. Make processing idempotent, and add a scheduled job
+for expiry that is safe to run on multiple instances. Update docs/architecture.md and add sequence views for REST
+ingestion and expiry.
+
+Expected outcome:
+One processing path that enforces the business rules identically for every channel, documented end to end.
+```
+
+#### `9121127` test: add application skeleton and failing tests (TDD red phase)
+
+Prompt 1: platform foundation
+
+```text
+Context:
+The architecture is approved. The project is still a plain Maven baseline.
+
+Ask:
+Stand up the platform: Spring Boot 4.1 on Java 21 with Kafka, JPA on PostgreSQL with Flyway, MongoDB, and ShedLock
+so scheduled jobs run on exactly one instance in a cluster. Separate the test tiers: unit tests (*Test) run without
+Docker in the test phase; integration tests (*IT) run in verify.
+
+Expected outcome:
+A pom.xml and application.yml for the full stack, with a fast feedback loop for unit tests and a separate,
+infrastructure-backed integration tier.
+```
+
+Prompt 2: executable specification (TDD phase: Red)
+
+```text
+Context:
+We work test first. No business logic exists yet, and the tests will be the executable specification of the brief.
+
+Ask:
+Create every component from the design as a stub (domain, validation rules, persistence, outbox, Kafka and REST
+adapters, schedulers) and write the tests first for each business rule. Make time a dependency by injecting a Clock,
+so date rules are deterministic. Do not implement any logic.
+
+Example:
+- Stored T1 v2, incoming T1 v1: LowerVersionTradeException.
+- Stored T1 v2, incoming T1 v2 with a new counter-party: record replaced.
+- Today 2026-10-13, maturity 2026-10-12: MaturityDateInPastException.
+- Maturity 2026-10-12, expiry run on 2026-10-13: expired = true.
+
+Expected outcome:
+A compiling test suite that fails for the intended reason on every rule, ready to drive the implementation.
+```
+
+Prompt 3: integration test strategy
+
+```text
+Context:
+Mocks cannot prove SQL semantics, MongoDB writes or Kafka wiring, and those are where the consistency risks live.
+
+Ask:
+Add Testcontainers integration tests against real PostgreSQL, MongoDB and Kafka: the end-to-end flow from a Kafka
+message to persisted trade state and audit history, and the expiry query against PostgreSQL.
+
+Expected outcome:
+An integration tier that runs in mvn verify and proves behaviour against production-equivalent infrastructure.
+```
+
+Prompt 4: delivery pipeline and security gate
+
+```text
+Context:
+The brief requires a pipeline with automated regression tests and an OSS vulnerability scan that fails the build on
+critical or blocker findings.
+
+Ask:
+Create a GitHub Actions pipeline that runs mvn verify across both test tiers and an OWASP Dependency-Check gate that
+fails on CVSS 9.0 and above. Publish test and scan reports as build artifacts for auditability.
+
+Expected outcome:
+.github/workflows/ci.yml with an explicit, reviewable failure threshold and retained evidence for every run.
+```
+
+Prompt 5: API contract consistency
+
+```text
+Ask:
+Standardise the REST contract on the versioned base path /api/v1/trades across code, README and diagrams.
+
+Expected outcome:
+One API contract, consistently documented, with versioning in place from the first release.
+```
+
+#### `e404f51` feat: implement trade processing, adapters and schedulers (TDD green phase)
+
+Prompt 1: implementation (TDD phase: Green)
+
+```text
+Context:
+The red-phase suite fails because every component is a stub.
+
+Ask:
+Implement the minimum logic to turn the suite green, component by component: the version and maturity rules, the
+processing service with idempotency and rejection recording, the outbox writer and relay, the expiry service and
+scheduler, the Kafka consumer, and the REST controllers. Expose errors as RFC 9457 problem details with status codes
+that reflect the business outcome. Tests are the specification; do not modify one to make it pass.
+
+Example:
+Lower version: 409 Conflict. Maturity in the past: 422 Unprocessable Content. Invalid payload: 400 Bad Request.
+
+Expected outcome:
+A green unit suite delivered by the smallest implementation that satisfies the specification.
+```
+
+Prompt 2: evidence of completion
+
+```text
+Ask:
+Run the unit suite and report the actual pass count. List every component that is still a stub.
+
+Expected outcome:
+A completion status grounded in test output, and a clear backlog for the integration phase.
+```
+
+### 14 October 2026
+
+#### `fa8f228` feat: Liquibase migrations, connection pools, compose stack and UTC clock
+
+Prompt 1: schema governance (TDD phase: Refactor)
+
+```text
+Context:
+PostgreSQL schema changes run through Flyway, while MongoDB collections and indexes are not versioned at all.
+
+Ask:
+Standardise schema governance on Liquibase for both stores, so every structural change to either database is
+versioned, reviewable and repeatable.
+
+Expected outcome:
+Versioned changelogs for PostgreSQL and MongoDB, with the full suite still green.
+```
+
+Prompt 2: connection management
+
+```text
+Ask:
+Make connection management explicit and tunable: configure HikariCP for PostgreSQL and the MongoDB driver pool from
+application.yml, with sizes and timeouts suited to the processing load.
+
+Expected outcome:
+Externalised, tested pool configuration instead of library defaults.
+```
+
+Prompt 3: local environment parity
+
+```text
+Context:
+There is no reproducible local runtime yet.
+
+Ask:
+Provide a compose.yml for PostgreSQL, MongoDB and Kafka, pinned to the same image versions as the Testcontainers
+tests, so local, test and CI environments do not drift.
+
+Example:
+postgres:18 and apache/kafka:4.1.0 in both compose.yml and the tests.
+
+Expected outcome:
+docker compose up provides a production-like local stack identical to the test infrastructure.
+```
+
+Prompt 4: time determinism
+
+```text
+Context:
+Maturity validation and expiry both depend on "today", and the application currently uses the Europe/London
+business zone, which makes outcomes depend on deployment configuration.
+
+Ask:
+Make time handling deterministic: run the clock, the expiry schedule and the JVM default zone in UTC.
+
+Expected outcome:
+Identical business outcomes regardless of where the service is deployed.
+```
+
+Prompt 5: architecture conformance review
+
+```text
+Context:
+The implementation is functionally complete. Before hardening, I want an independent review against the baseline.
+
+Ask:
+Review the code against the requirements and the architecture. Harden the Kafka consumer against malformed and
+inconsistent input. Add integration tests for cross-store consistency between PostgreSQL and MongoDB, schema
+migrations, connection pools and the query service. TradeStoreFlowIT fails when run with the rest of the suite;
+find the root cause rather than masking it.
+
+Example:
+A Kafka record with key T2 and a payload for T1 must be rejected, because it would break per-trade ordering.
+
+Expected outcome:
+Every gap closed with a test that proves it, and test isolation fixed at the cause.
+```
+
+Prompt 6: documentation conformance
+
+```text
+Ask:
+Remove configuration that has no runtime effect, and bring docs/architecture.md and the diagrams back in line with
+the implementation.
+
+Expected outcome:
+Documentation that describes exactly what the system does, nothing more.
+```
+
+#### `6338562` feat: fix owasp scan
+
+```text
+Context:
+The OWASP Dependency-Check gate fails in GitHub Actions. The NVD API key is held as a repository secret.
+
+Ask:
+Diagnose whether the failure is a scanner configuration issue or a genuine vulnerability, and fix it accordingly.
+Add a pre-flight check that Docker is available on the runner before the integration tier runs.
+
+Expected outcome:
+A security gate that completes reliably and distinguishes tooling failures from real findings.
+```
+
+#### `7479e1c` ci: upgrade Dependency-Check to 13.0.0 and cache the NVD database
+
+```text
+Context:
+The scan is slow and the NVD download is unreliable, which makes the security gate flaky.
+
+Ask:
+Upgrade Dependency-Check to 13.0.0 and cache the NVD database across runs. The cache must persist even when the gate
+fails on a vulnerability. Produce HTML and JSON reports and warn when they are missing. Move the remaining actions to
+their current major versions.
+
+Expected outcome:
+A fast, deterministic security gate with an unchanged failure threshold.
+```
+
+#### `886659d` fix: outbox relay backlog, concurrent first insert and rejection connections
+
+```text
+Context:
+The outbox relay, processing service and rejection recorder are correct on the happy path. I need confidence in
+their failure modes before this is production-grade.
+
+Ask:
+Run a failure-mode review and fix every defect with a regression test:
+1. Kafka is unavailable for an extended period and the backlog grows. Does MongoDB history stall with it, and can the
+   relay outlive its ShedLock lease?
+2. Two requests insert the same new trade id concurrently.
+3. Recording a rejection requires a second database connection, risking pool exhaustion under load.
+Update the architecture documentation and diagrams to reflect the fixes.
+
+Expected outcome:
+Destinations delivered independently, a concurrent first insert surfaced as a retryable error, rejections recorded in
+the processing transaction, and each behaviour proven by a test.
+```
+
+#### `e8374dd` fix: patch vulnerable dependencies and speed up the OWASP scan
+
+Prompt 1: vulnerability remediation
+
+```text
+Context:
+The OWASP gate reports critical CVEs in Tomcat and the MongoDB driver.
+
+Ask:
+Remediate by overriding the versions Spring Boot manages. Suppress a finding only when it is an evidenced false
+positive or has no fixed release; document the justification and give every suppression an expiry date. The
+threshold stays as it is.
+
+Expected outcome:
+A green gate because the risk is removed, not hidden, with every exception auditable and time-boxed.
+```
+
+Prompt 2: scan performance
+
+```text
+Context:
+Pull request scans still download the full NVD database, slowing feedback for every change.
+
+Ask:
+Add a scheduled workflow that refreshes the database daily on the default branch so pull requests reuse a warm cache,
+and disable analyzers that do not apply to a Maven codebase.
+
+Example:
+OSS Index, RetireJS, Node and .NET analyzers.
+
+Expected outcome:
+Fast pull request feedback with the same level of security assurance.
+```
+
+#### `e27bace` feat: secure REST API, rate limiting, Mongo projection, purge job and metrics
+
+Prompt 1: requirements traceability review
+
+```text
+Context:
+The core platform is built and the security gate is green. Before submission I need assurance that the solution
+meets the assignment as written, not as remembered. The brief is attached.
+
+Ask:
+Trace every requirement in the brief to the evidence in the repository: code, tests, pipeline, diagrams and docs.
+Mark a requirement met only where there is evidence, list the gaps, and propose the next steps to close them.
+
+Expected outcome:
+A requirement-by-requirement traceability view with evidence, gaps and a short remediation plan.
+```
+
+Prompt 2: close the gaps and deliver the planned capabilities
+
+```text
+Context:
+The review proposed three steps: create the AI prompts document, run the full suite with mvn verify, and prove each
+row of the assignment's sample table with a test. docs/architecture.md also lists capabilities still marked as
+planned.
+
+Ask:
+Execute the three steps, then deliver every planned capability with tests first:
+- Secure the REST channel as an OAuth2 resource server validating JWTs: trades:write to ingest, trades:read to query;
+  health stays public. Provide a local Keycloak realm in compose with a producer and a read-only client.
+- Rate limit ingestion per client (JWT subject) with 429 and Retry-After, and cap the request body size (411 when the
+  length is missing, 413 when it is too large).
+- Project current trade state into a MongoDB read view, applied by the outbox relay with version-conditional upserts
+  so replays and out-of-order delivery are safe.
+- Purge old idempotency records in batches under a ShedLock-guarded schedule.
+- Publish business metrics (trades processed by source and outcome, expired, rate limited, outbox backlog) and emit
+  structured JSON logs.
+- Add a Kafka SASL_SSL profile with credentials supplied from the environment.
+
+Example:
+Sample table, with a movable clock and "today" = 10/01/2020: T3 (maturity 20/05/2014) arrives in 2014 and is
+expired = Y by 2020; T2 v1 arrives on 14/03/2015 and is replaced by T2 v2, which keeps v1 in its history; T2 v1
+arriving again after v2 is rejected; T1 stays N until 20/05/2020 has passed.
+
+Expected outcome:
+No capability left as "planned", each one proven by a test, and mvn verify green across the unit and integration
+tiers.
+```
+
+Prompt 3: read model exposure
+
+```text
+Context:
+MongoDB now holds both the audit history and the current-state read view.
+
+Ask:
+Confirm which REST endpoints are served from MongoDB, and expose the read view by book so consumers can query it
+without touching the system of record.
+
+Example:
+GET /api/v1/trades/{tradeId}/history from trade_events; GET /api/v1/books/{bookId}/trades from trade_views.
+
+Expected outcome:
+Read paths served by the store designed for them, with the PostgreSQL write path left untouched.
+```
+
+Prompt 4: documentation and code conformance
+
+```text
+Context:
+Several capabilities moved from planned to implemented in one change.
+
+Ask:
+Verify that nothing in the README, docs/architecture.md or the diagrams is still described as planned or
+unimplemented, and that the code matches the brief. Correct any statement the code does not back up.
+
+Expected outcome:
+Documentation and code that agree, with every claim verifiable in the repository.
+```
+
+#### `e74ba75` docs: rewrite README local setup and workflow testing guide
+
+Prompt 1: operational onboarding guide
+
+```text
+Context:
+The system now has OAuth2, rate limiting, two ingestion channels, a MongoDB read model and scheduled expiry. A
+reviewer must be able to run and exercise all of it locally without reading the code.
+
+Ask:
+Rewrite the README local setup and add a workflow testing guide. Cover starting the stack with a Keycloak readiness
+check, the application settings, obtaining and decoding tokens, the security scenarios, REST ingestion rules,
+idempotency and size limits, reads from PostgreSQL and MongoDB, rate limiting, Kafka ingestion and the dead-letter
+topic, expiry and the trade-status topic, the SASL_SSL profile and the metrics. Run every command against the
+local stack before documenting it, and state clearly what could not be verified locally.
+
+Example:
+With REST_REQUESTS_PER_SECOND=2, five rapid requests return 201, 201, 429, 429, 429, each 429 with Retry-After: 1.
+
+Expected outcome:
+A README that takes a reviewer from a clean machine to every business and security scenario, with commands that are
+known to work.
+```
+
+#### AI prompts document (this file)
+
+The prompt log was kept in a separate document outside the repository during development. It was given to Claude
+Code, which formatted it into this file and aligned each prompt with the commit history.
+
+```text
+Context:
+The assignment requires every AI prompt to be shared in a separate document. My prompt log is kept outside the
+repository and is attached.
+
+Ask:
+Bring the log into docs/ai-prompts.md for submission. Group the prompts by the commit they produced, give each the
+same Context / Ask / Example / Expected outcome structure, and check every commit hash, version, status code and
+example against the git history and the code. Tick the AI-prompts requirement in the README.
+
+Expected outcome:
+A submission-ready prompt record in which every prompt maps to a commit and every fact matches the repository.
+```
+
+#### Final submission review
+
+```text
+Context:
+Implementation is complete and nothing is pending. Before submission I want an independent conformance review of
+the whole repository against the assignment brief, as a second architect would perform it.
+
+Ask:
+Review the code, tests, pipeline, diagrams and documentation against every requirement in the brief. Specifically:
+- Trace each business rule and technical requirement to the code and the test that proves it.
+- Find any component whose behaviour is claimed but not covered by a test.
+- Find any statement in the README, docs/architecture.md or the PlantUML diagrams that does not match the code:
+  endpoints, status codes, configuration defaults, metric names, retry policy, environment variables.
+- Find anything still described as planned, stubbed or superseded (for example Flyway or the Europe/London zone).
+Fix every gap at its source, with a test where behaviour is involved, and report the residual risks you chose not to
+change.
+
+Example:
+The README claims all functionality is covered by JUnit tests, but the outbox backlog gauge has no test; the
+diagram says "422 Unprocessable Entity" while the code returns UNPROCESSABLE_CONTENT.
+
+Expected outcome:
+A requirement-by-requirement conformance view, every gap closed with evidence (a passing test run), documentation
+that matches the implementation exactly, and an explicit list of accepted residual risks.
+```

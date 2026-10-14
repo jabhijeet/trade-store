@@ -2,7 +2,7 @@
 
 A trade store that receives a high volume of trades (thousands, over any transmission channel), validates them, and stores each trade in a defined sequence based on its trade id and version.
 
-> **Status:** Kafka and REST ingestion, the validation rules, automatic expiry, the transactional outbox to MongoDB and Kafka, the read-only query API, OAuth2/JWT security, per-client rate limiting, the MongoDB `trade_views` projection, the idempotency purge job, application metrics and structured logs are implemented and tested; see [Implementation Status](docs/architecture.md#12-implementation-status).
+> **Status:** Kafka and REST ingestion, the validation rules, automatic expiry, the transactional outbox to MongoDB and Kafka, the read-only query API, OAuth2/JWT security, per-client rate limiting, the MongoDB `trade_views` projection, the idempotency purge job, application metrics, structured logs and the Kafka SASL_SSL profile are implemented and tested; see [Implementation Status](docs/architecture.md#12-implementation-status).
 
 ## Problem Statement
 
@@ -53,7 +53,7 @@ See [docs/architecture.md](docs/architecture.md) for details and PlantUML diagra
   - [x] Automated regression testing (`mvn verify`: unit and integration tests)
   - [x] Open Source Software (OSS) vulnerability scan that **fails the build** on critical or blocker vulnerabilities (OWASP Dependency-Check, CVSS ≥ 9)
 - [x] **PlantUML** sequence, class, and/or design diagrams where feasible ([docs/diagrams](docs/diagrams))
-- [ ] If AI tools are used, all prompts are shared in a separate document ([docs/ai-prompts.md](docs/ai-prompts.md); this session's prompts are recorded, the earlier sessions' prompts still have to be pasted in)
+- [x] If AI tools are used, all prompts are shared in a separate document ([docs/ai-prompts.md](docs/ai-prompts.md))
 
 ## Build and Test
 
