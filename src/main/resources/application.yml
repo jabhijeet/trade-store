@@ -1,0 +1,71 @@
+spring:
+  application:
+    name: trade-store
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/tradestore}
+    username: ${POSTGRES_USER:tradestore}
+    password: ${POSTGRES_PASSWORD:}
+    # HikariCP pool for PostgreSQL. Kept small: the Kafka consumer, REST ingestion and the two scheduled jobs are
+    # the only writers, and every write is a short transaction.
+    # Timeouts are in milliseconds: these properties bind directly to HikariCP's long setters, so duration
+    # strings such as "5s" are rejected.
+    hikari:
+      pool-name: trade-store-postgres
+      maximum-pool-size: ${POSTGRES_POOL_MAX_SIZE:10}
+      minimum-idle: ${POSTGRES_POOL_MIN_IDLE:2}
+      connection-timeout: 5000          # 5 s
+      idle-timeout: 300000              # 5 min
+      max-lifetime: 1800000             # 30 min
+      leak-detection-threshold: 60000   # 60 s
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  liquibase:
+    change-log: classpath:db/changelog/postgres/db.changelog-master.yaml
+  mongodb:
+    uri: ${MONGODB_URI:mongodb://localhost:27017/tradestore}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: trade-store
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true
+    listener:
+      ack-mode: record
+
+trade-store:
+  mongodb:
+    liquibase:
+      enabled: true
+      change-log: db/changelog/mongodb/db.changelog-master.yaml
+    # MongoDB driver pool (not HikariCP). Used by the outbox relay and history reads.
+    pool:
+      max-size: ${MONGODB_POOL_MAX_SIZE:20}
+      min-size: ${MONGODB_POOL_MIN_SIZE:2}
+      max-wait-time: 5s
+      max-connection-idle-time: 5m
+      max-connection-life-time: 30m
+  topics:
+    trades: trades
+    trade-status: trade-status
+  expiry:
+    cron: "0 5 0 * * *"
+    batch-size: 500
+  outbox:
+    poll-interval-ms: 1000
+    batch-size: 200
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics

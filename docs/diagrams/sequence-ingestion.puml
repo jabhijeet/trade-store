@@ -12,15 +12,15 @@ queue "Kafka (dead-letter)" as dlt
 producer -> kafka : publish(key = tradeId, trade)
 kafka -> consumer : message (ordered per tradeId)
 
-alt cannot deserialize or unknown schemaVersion
-  consumer -> dlt : send message
+alt invalid JSON, unknown schemaVersion, missing field\nor record key different from tradeId
+  consumer -> dlt : send message (not retried)
   consumer -> kafka : commit offset
 else valid message
   consumer -> processing : process(command, messageId = kafka:topic:partition:offset)
   processing -> postgres : BEGIN
-  processing -> postgres : insert processed_message(messageId)
+  processing -> postgres : find processed_message(messageId)
   alt messageId already processed
-    processing -> postgres : ROLLBACK
+    processing -> postgres : end transaction (nothing written)
     processing --> consumer : recorded outcome (duplicate)
   else new message
     processing -> postgres : select trade by tradeId for update
@@ -28,17 +28,18 @@ else valid message
     alt all rules pass
       processing -> postgres : insert or update trade
       processing -> postgres : insert outbox_event (CREATED / UPDATED / REPLACED)
+      processing -> postgres : insert processed_message(messageId, outcome)
       processing -> postgres : COMMIT
       processing --> consumer : SaveOutcome
     else rule fails (maturity in past or lower version)
       rules --> processing : TradeRejectedException
       processing -> postgres : ROLLBACK
-      processing -> postgres : new transaction: insert processed_message(REJECTED)\n+ outbox_event (REJECTED, reason); COMMIT
+      processing -> postgres : new transaction: insert processed_message(REJECTED_*)\n+ outbox_event (REJECTED, reason); COMMIT
       processing --> consumer : throw TradeRejectedException
-      note right of consumer : not retried\n(business rejection)
+      note right of consumer : logged, not retried\n(business rejection)
     else transient failure (database unavailable, lock timeout)
       processing --> consumer : throw transient exception
-      note right of consumer : retried with backoff,\noffset not committed
+      note right of consumer : retried with backoff,\noffset not committed;\ndead-letter topic after 10 minutes
     end
   end
   consumer -> kafka : commit offset (after commit or rejection)

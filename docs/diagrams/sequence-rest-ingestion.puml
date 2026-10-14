@@ -2,13 +2,18 @@
 title Trade Store - REST Ingestion (backup / direct)
 
 actor "Trade Producer" as producer
-participant "Security\n(OAuth2 JWT)" as security
-participant "Rate Limiter\n(per client)" as rateLimiter
+participant "Security\n(OAuth2 JWT, planned)" as security
+participant "Rate Limiter\n(per client, planned)" as rateLimiter
 participant "Trade Ingestion API" as api
 participant "Trade Processing Service" as processing
 database "PostgreSQL" as postgres
 
-producer -> security : POST /trades\n(Bearer token, optional Idempotency-Key)
+note over security, rateLimiter
+  Planned. Until implemented, requests
+  reach the Trade Ingestion API directly.
+end note
+
+producer -> security : POST /api/v1/trades\n(Bearer token, optional Idempotency-Key)
 alt missing or invalid token / scope
   security --> producer : 401 Unauthorized / 403 Forbidden
 else authenticated (trades:write)
@@ -28,7 +33,7 @@ else authenticated (trades:write)
         api --> producer : original status
       else CREATED
         processing --> api : CREATED
-        api --> producer : 201 Created
+        api --> producer : 201 Created (Location)
       else UPDATED or REPLACED
         processing --> api : UPDATED / REPLACED
         api --> producer : 200 OK
@@ -40,7 +45,7 @@ else authenticated (trades:write)
         api --> producer : 422 Unprocessable Entity
       else database unavailable
         processing --> api : transient exception
-        api --> producer : 503 Service Unavailable
+        api --> producer : 503 Service Unavailable (Retry-After)
       end
     end
   end

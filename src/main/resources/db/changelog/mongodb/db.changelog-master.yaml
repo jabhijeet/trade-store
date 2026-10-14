@@ -1,0 +1,6 @@
+# MongoDB schema, applied at startup by MongoLiquibaseConfig using the Liquibase MongoDB extension.
+# Add a new numbered file under changes/ for every collection or index change; never edit an applied change set.
+databaseChangeLog:
+  - include:
+      file: changes/001-create-trade-events.yaml
+      relativeToChangelogFile: true

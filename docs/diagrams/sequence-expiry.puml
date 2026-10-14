@@ -3,10 +3,10 @@ title Trade Store - Trade Expiry
 
 participant "Expiry Scheduler" as scheduler
 participant "ShedLock" as shedlock
-participant "Clock\n(business time zone)" as clock
+participant "Clock\n(UTC)" as clock
 database "PostgreSQL" as postgres
-participant "Monitoring" as monitoring
 
+note over scheduler : daily at 00:05 UTC\n(trade-store.expiry.cron)
 scheduler -> shedlock : acquire lock "expire-trades"
 alt lock held by another instance
   shedlock --> scheduler : skip run
@@ -18,7 +18,7 @@ else lock acquired
     scheduler -> postgres : insert outbox_event (EXPIRED) per returned row
     scheduler -> postgres : COMMIT
   end
-  scheduler -> monitoring : record expired trade count
+  scheduler -> scheduler : log expired trade count
   scheduler -> shedlock : release lock
 end
 

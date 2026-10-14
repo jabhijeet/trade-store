@@ -14,11 +14,11 @@ else lock acquired
   relay -> postgres : select undelivered events\norder by created_at limit batch
   loop for each event
     alt not yet delivered to MongoDB
-      relay -> mongo : upsert trade_events (_id = event id)\nupdate projections
+      relay -> mongo : upsert trade_events (_id = event id)\n(projections planned)
       relay -> postgres : set mongo_delivered_at
     end
     alt EXPIRED event not yet delivered to Kafka
-      relay -> statusTopic : publish (key = tradeId)
+      relay -> statusTopic : publish (key = tradeId),\nwait up to 10 s for ack
       relay -> postgres : set kafka_delivered_at
     end
   end
