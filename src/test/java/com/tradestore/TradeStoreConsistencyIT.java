@@ -8,6 +8,7 @@ import static org.awaitility.Awaitility.await;
 import com.github.dockerjava.api.DockerClient;
 import com.tradestore.domain.EventSource;
 import com.tradestore.domain.IncomingTrade;
+import com.tradestore.domain.SaveOutcome;
 import com.tradestore.domain.TradeCommand;
 import com.tradestore.domain.TradeEventType;
 import com.tradestore.persistence.mongo.TradeEventDocument;
@@ -17,6 +18,7 @@ import com.tradestore.service.TradeProcessingService;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -26,10 +28,13 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.ConcurrencyFailureException;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.kafka.KafkaContainer;
@@ -45,6 +50,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 @Import({TestcontainersConfiguration.class, TradeStoreConsistencyIT.FastFailingClients.class})
 @TestPropertySource(properties = {
         "trade-store.outbox.poll-interval-ms=200",
+        // Small batches, so a backlog larger than one batch is cheap to create
+        "trade-store.outbox.batch-size=2",
+        "trade-store.expiry.batch-size=2",
         "spring.datasource.hikari.data-source-properties.socketTimeout=3",
         "spring.kafka.producer.properties.max.block.ms=2000"
 })
@@ -63,6 +71,8 @@ class TradeStoreConsistencyIT {
     private TradeEventMongoRepository tradeEventRepository;
     @Autowired
     private JdbcClient jdbcClient;
+    @Autowired
+    private PlatformTransactionManager transactionManager;
     @Autowired
     private PostgreSQLContainer postgres;
     @Autowired
@@ -176,6 +186,86 @@ class TradeStoreConsistencyIT {
 
         await().atMost(CONVERGENCE_TIMEOUT).until(() -> pendingKafkaDeliveries("C6") == 0);
         assertThat(history("C6")).hasSize(1);
+    }
+
+    /**
+     * Two first versions of the same new trade id: the second insert blocks on the first's uncommitted row, then fails
+     * on the primary key once the first commits. It must surface as a transient failure (so callers retry), and a
+     * retry must apply the normal version check against the stored row.
+     */
+    @Test
+    void concurrentInsertOfNewTradeId_LoserGetsTransientFailureAndRetrySucceeds() throws Exception {
+        TransactionTemplate transaction = new TransactionTemplate(transactionManager);
+        TradeCommand loser = command("rest:" + UUID.randomUUID(), "C9", 1);
+        CompletableFuture<Throwable> loserResult = new CompletableFuture<>();
+
+        transaction.executeWithoutResult(status -> {
+            jdbcClient.sql("""
+                    INSERT INTO trades (trade_id, version, counter_party_id, book_id, maturity_date, created_date,
+                                        expired, updated_at)
+                    VALUES ('C9', 1, 'CP-1', 'B1', :maturity, :created, FALSE, now())""")
+                    .param("maturity", TODAY.plusYears(1))
+                    .param("created", TODAY)
+                    .update();
+            Thread.ofVirtual().start(() -> {
+                try {
+                    tradeProcessingService.process(loser);
+                    loserResult.complete(null);
+                } catch (Throwable failure) {
+                    loserResult.complete(failure);
+                }
+            });
+            // Commit only once the loser's insert is waiting on this transaction's uncommitted row
+            await().atMost(CONVERGENCE_TIMEOUT).until(() -> jdbcClient.sql("""
+                            SELECT count(*) FROM pg_stat_activity
+                            WHERE wait_event_type = 'Lock' AND query ILIKE 'insert into trades%'""")
+                    .query(Long.class).single() == 1);
+        });
+
+        assertThat(loserResult.get(CONVERGENCE_TIMEOUT.toSeconds(), TimeUnit.SECONDS))
+                .isInstanceOf(ConcurrencyFailureException.class);
+        assertThat(count("processed_message", "C9")).isZero();
+
+        assertThat(tradeProcessingService.process(loser)).isEqualTo(SaveOutcome.REPLACED);
+        assertThat(tradeVersion("C9")).isEqualTo(1);
+    }
+
+    /**
+     * Regression: more {@code EXPIRED} events waiting for Kafka than fit in one relay batch must not stop newer events
+     * from reaching MongoDB. The batch size is 2 in this test class, and three expiry events wait for Kafka.
+     */
+    @Test
+    void kafkaOutageWithBacklogLargerThanBatch_NewerEventsStillReachMongo() {
+        for (String tradeId : List.of("C7A", "C7B", "C7C")) {
+            jdbcClient.sql("""
+                    INSERT INTO trades (trade_id, version, counter_party_id, book_id, maturity_date, created_date,
+                                        expired, updated_at)
+                    VALUES (:id, 1, 'CP-1', 'B1', :maturity, :created, FALSE, now())""")
+                    .param("id", tradeId)
+                    .param("maturity", TODAY.minusDays(1))
+                    .param("created", TODAY.minusYears(1))
+                    .update();
+        }
+
+        pause(kafka);
+        try {
+            assertThat(tradeExpiryService.expireNextBatch(TODAY)).isEqualTo(2);
+            assertThat(tradeExpiryService.expireNextBatch(TODAY)).isEqualTo(1);
+            tradeProcessingService.process(command("rest:" + UUID.randomUUID(), "C8", 1));
+
+            await().atMost(CONVERGENCE_TIMEOUT).untilAsserted(() -> {
+                assertThat(history("C8")).extracting(TradeEventDocument::type)
+                        .containsExactly(TradeEventType.CREATED);
+                assertThat(pendingMongoDeliveries("C7C")).isZero();
+            });
+            assertThat(pendingKafkaDeliveries("C7A") + pendingKafkaDeliveries("C7B") + pendingKafkaDeliveries("C7C"))
+                    .isEqualTo(3);
+        } finally {
+            unpause(kafka);
+        }
+
+        await().atMost(CONVERGENCE_TIMEOUT).until(() ->
+                pendingKafkaDeliveries("C7A") + pendingKafkaDeliveries("C7B") + pendingKafkaDeliveries("C7C") == 0);
     }
 
     private void publish(String tradeId, int version) {

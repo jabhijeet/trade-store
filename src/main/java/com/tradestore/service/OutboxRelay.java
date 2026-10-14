@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Predicate;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
@@ -26,7 +27,11 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Delivers outbox events to MongoDB (all events) and to the {@code trade-status} topic ({@code EXPIRED} events).
- * Each destination is tracked separately; a failed delivery is retried on the next poll.
+ * <p>
+ * Each destination is read, delivered and marked independently, so an outage of one never holds up the other.
+ * Within a poll, the first failure for a destination stops further deliveries to it until the next poll: that bounds
+ * a poll to one timeout per destination (keeping it well inside the ShedLock lease) and preserves per-trade order on
+ * the {@code trade-status} topic.
  */
 @Slf4j
 @Component
@@ -47,56 +52,65 @@ public class OutboxRelay {
     @Scheduled(fixedDelayString = "${trade-store.outbox.poll-interval-ms}")
     @SchedulerLock(name = "outbox-relay")
     public void run() {
-        int read = deliverPendingEvents();
-        log.debug("Outbox poll completed: eventsRead={}", read);
+        int delivered = deliverPendingEvents();
+        log.debug("Outbox poll completed: deliveries={}", delivered);
     }
 
     /**
-     * Delivers one batch of pending events.
+     * Delivers one batch of pending events to each destination.
      *
-     * @return the number of events read in this poll
+     * @return the number of successful deliveries in this poll, counting each destination separately
      */
     public int deliverPendingEvents() {
-        List<OutboxEventEntity> events =
-                outboxEventRepository.findUndelivered(Limit.of(properties.outbox().batchSize()));
-        for (OutboxEventEntity event : events) {
-            deliverToMongo(event);
-            deliverToKafka(event);
-            outboxEventRepository.save(event);
-        }
-        return events.size();
+        Limit batch = Limit.of(properties.outbox().batchSize());
+        int delivered = deliverUntilFirstFailure(outboxEventRepository.findPendingMongoDelivery(batch),
+                this::deliverToMongo);
+        delivered += deliverUntilFirstFailure(outboxEventRepository.findPendingKafkaDelivery(batch),
+                this::deliverToKafka);
+        return delivered;
     }
 
-    private void deliverToMongo(OutboxEventEntity event) {
-        if (event.getMongoDeliveredAt() != null) {
-            return;
+    private static int deliverUntilFirstFailure(List<OutboxEventEntity> events,
+                                                Predicate<OutboxEventEntity> delivery) {
+        int delivered = 0;
+        for (OutboxEventEntity event : events) {
+            if (!delivery.test(event)) {
+                break;
+            }
+            delivered++;
         }
+        return delivered;
+    }
+
+    private boolean deliverToMongo(OutboxEventEntity event) {
         try {
             tradeEventRepository.save(toDocument(event));
-            event.setMongoDeliveredAt(Instant.now(clock));
         } catch (DataAccessException exception) {
-            log.warn("MongoDB delivery failed, will retry: eventId={}, tradeId={}, error={}",
+            log.warn("MongoDB delivery failed, will retry next poll: eventId={}, tradeId={}, error={}",
                     event.getId(), event.getTradeId(), exception.getMessage());
+            return false;
         }
+        outboxEventRepository.markMongoDelivered(event.getId(), Instant.now(clock));
+        return true;
     }
 
-    private void deliverToKafka(OutboxEventEntity event) {
-        if (!event.requiresKafkaDelivery() || event.getKafkaDeliveredAt() != null) {
-            return;
-        }
+    private boolean deliverToKafka(OutboxEventEntity event) {
         try {
             String message = jsonMapper.writeValueAsString(new TradeStatusMessage(event.getId().toString(),
                     event.getTradeId(), event.getVersion(), event.getType(), event.getCreatedAt()));
             kafkaTemplate.send(properties.topics().tradeStatus(), event.getTradeId(), message)
                     .get(KAFKA_SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            event.setKafkaDeliveredAt(Instant.now(clock));
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
-            log.warn("Kafka delivery interrupted, will retry: eventId={}", event.getId());
+            log.warn("Kafka delivery interrupted, will retry next poll: eventId={}", event.getId());
+            return false;
         } catch (ExecutionException | TimeoutException | KafkaException exception) {
-            log.warn("Kafka delivery failed, will retry: eventId={}, tradeId={}, error={}",
+            log.warn("Kafka delivery failed, will retry next poll: eventId={}, tradeId={}, error={}",
                     event.getId(), event.getTradeId(), exception.getMessage());
+            return false;
         }
+        outboxEventRepository.markKafkaDelivered(event.getId(), Instant.now(clock));
+        return true;
     }
 
     private TradeEventDocument toDocument(OutboxEventEntity event) {

@@ -27,6 +27,7 @@ import com.tradestore.persistence.sql.TradeEntity;
 import com.tradestore.persistence.sql.TradeJpaRepository;
 import com.tradestore.validation.MaturityDateRule;
 import com.tradestore.validation.VersionRule;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -36,6 +37,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.ConcurrencyFailureException;
+import org.springframework.dao.DataIntegrityViolationException;
 import tools.jackson.databind.json.JsonMapper;
 
 @ExtendWith(MockitoExtension.class)
@@ -58,6 +61,44 @@ class TradeProcessingServiceTest {
         var rejectionRecorder = new RejectionRecorder(processedMessageRepository, outboxWriter, FIXED_CLOCK);
         service = new TradeProcessingService(tradeRepository, processedMessageRepository,
                 List.of(new MaturityDateRule(), new VersionRule()), outboxWriter, rejectionRecorder, FIXED_CLOCK);
+    }
+
+    @Test
+    void process_WhenNewTradeIsInsertedConcurrently_ThrowsTransientConcurrencyFailure() {
+        when(processedMessageRepository.findById(MESSAGE_ID)).thenReturn(Optional.empty());
+        when(tradeRepository.findByIdForUpdate("T1")).thenReturn(Optional.empty());
+        when(tradeRepository.saveAndFlush(any(TradeEntity.class))).thenThrow(integrityViolation("23505"));
+
+        assertThatThrownBy(() -> service.process(command(incoming("T1", 1))))
+                .isInstanceOf(ConcurrencyFailureException.class)
+                .hasMessageContaining("T1");
+        verify(outboxEventRepository, never()).save(any());
+        verify(processedMessageRepository, never()).save(any());
+    }
+
+    @Test
+    void process_WhenNewTradeHasValueTooLongForColumn_RethrowsOriginalException() {
+        when(processedMessageRepository.findById(MESSAGE_ID)).thenReturn(Optional.empty());
+        when(tradeRepository.findByIdForUpdate("T1")).thenReturn(Optional.empty());
+        when(tradeRepository.saveAndFlush(any(TradeEntity.class))).thenThrow(integrityViolation("22001"));
+
+        assertThatThrownBy(() -> service.process(command(incoming("T1", 1))))
+                .isExactlyInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    @Test
+    void process_WhenUpdatingExistingTradeFailsIntegrityCheck_RethrowsOriginalException() {
+        when(processedMessageRepository.findById(MESSAGE_ID)).thenReturn(Optional.empty());
+        when(tradeRepository.findByIdForUpdate("T2")).thenReturn(Optional.of(storedEntity("T2", 1, false)));
+        when(tradeRepository.saveAndFlush(any(TradeEntity.class))).thenThrow(integrityViolation("23505"));
+
+        assertThatThrownBy(() -> service.process(command(incoming("T2", 2))))
+                .isExactlyInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    private static DataIntegrityViolationException integrityViolation(String sqlState) {
+        return new DataIntegrityViolationException("could not execute statement",
+                new SQLException("constraint or data error", sqlState));
     }
 
     @Test
@@ -116,7 +157,7 @@ class TradeProcessingServiceTest {
         assertThatThrownBy(() -> service.process(command(incoming("T2", 1))))
                 .isInstanceOf(LowerVersionTradeException.class);
 
-        verify(tradeRepository, never()).save(any());
+        verify(tradeRepository, never()).saveAndFlush(any());
         assertThat(capturedProcessedMessage().getOutcome()).isEqualTo(MessageOutcome.REJECTED_LOWER_VERSION);
         OutboxEventEntity event = capturedOutboxEvent();
         assertThat(event.getType()).isEqualTo(TradeEventType.REJECTED);
@@ -131,7 +172,7 @@ class TradeProcessingServiceTest {
         assertThatThrownBy(() -> service.process(command(incoming("T3", 1, TODAY.minusDays(1)))))
                 .isInstanceOf(MaturityDateInPastException.class);
 
-        verify(tradeRepository, never()).save(any());
+        verify(tradeRepository, never()).saveAndFlush(any());
         assertThat(capturedProcessedMessage().getOutcome()).isEqualTo(MessageOutcome.REJECTED_MATURITY_IN_PAST);
         assertThat(capturedOutboxEvent().getType()).isEqualTo(TradeEventType.REJECTED);
     }
@@ -164,7 +205,7 @@ class TradeProcessingServiceTest {
         SaveOutcome outcome = service.process(command(incoming("T1", 1)));
 
         assertThat(outcome).isEqualTo(SaveOutcome.CREATED);
-        verify(tradeRepository, never()).save(any());
+        verify(tradeRepository, never()).saveAndFlush(any());
         verify(outboxEventRepository, never()).save(any());
         verify(processedMessageRepository, never()).save(any());
     }
@@ -188,7 +229,7 @@ class TradeProcessingServiceTest {
 
     private TradeEntity capturedTrade() {
         var captor = ArgumentCaptor.forClass(TradeEntity.class);
-        verify(tradeRepository).save(captor.capture());
+        verify(tradeRepository).saveAndFlush(captor.capture());
         return captor.getValue();
     }
 

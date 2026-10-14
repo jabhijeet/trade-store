@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -38,6 +39,8 @@ class OutboxRelayTest {
 
     private static final String PAYLOAD = """
             {"tradeId":"T1","version":1,"counterPartyId":"CP-1","bookId":"B1","maturityDate":"2027-10-13"}""";
+    private static final Limit BATCH = Limit.of(200);
+    private static final Instant NOW = Instant.now(FIXED_CLOCK);
 
     @Mock
     private OutboxEventRepository outboxEventRepository;
@@ -55,13 +58,13 @@ class OutboxRelayTest {
     }
 
     @Test
-    void deliverPendingEvents_WhenCreatedEvent_UpsertsToMongoOnlyAndMarksMongoDelivered() {
+    void deliverPendingEvents_WhenMongoPending_UpsertsDocumentAndMarksOnlyMongoDelivered() {
         OutboxEventEntity event = event(TradeEventType.CREATED);
-        when(outboxEventRepository.findUndelivered(Limit.of(200))).thenReturn(List.of(event));
+        when(outboxEventRepository.findPendingMongoDelivery(BATCH)).thenReturn(List.of(event));
 
-        int read = relay.deliverPendingEvents();
+        int delivered = relay.deliverPendingEvents();
 
-        assertThat(read).isEqualTo(1);
+        assertThat(delivered).isEqualTo(1);
         var captor = ArgumentCaptor.forClass(TradeEventDocument.class);
         verify(tradeEventRepository).save(captor.capture());
         TradeEventDocument document = captor.getValue();
@@ -69,70 +72,68 @@ class OutboxRelayTest {
         assertThat(document.tradeId()).isEqualTo("T1");
         assertThat(document.type()).isEqualTo(TradeEventType.CREATED);
         assertThat(document.payload()).containsEntry("bookId", "B1");
+        verify(outboxEventRepository).markMongoDelivered(event.getId(), NOW);
+        verify(outboxEventRepository, never()).markKafkaDelivered(any(), any());
         verify(kafkaTemplate, never()).send(anyString(), anyString(), anyString());
-        assertThat(event.getMongoDeliveredAt()).isEqualTo(Instant.now(FIXED_CLOCK));
-        verify(outboxEventRepository).save(event);
     }
 
     @Test
-    void deliverPendingEvents_WhenExpiredEvent_DeliversToMongoAndTradeStatusTopic() {
+    void deliverPendingEvents_WhenKafkaPending_PublishesToTradeStatusTopicAndMarksOnlyKafkaDelivered() {
         OutboxEventEntity event = event(TradeEventType.EXPIRED);
-        when(outboxEventRepository.findUndelivered(Limit.of(200))).thenReturn(List.of(event));
+        when(outboxEventRepository.findPendingKafkaDelivery(BATCH)).thenReturn(List.of(event));
         when(kafkaTemplate.send(eq("trade-status"), eq("T1"), contains("EXPIRED")))
                 .thenReturn(CompletableFuture.completedFuture(null));
 
-        relay.deliverPendingEvents();
+        int delivered = relay.deliverPendingEvents();
 
-        verify(tradeEventRepository).save(any(TradeEventDocument.class));
-        assertThat(event.getMongoDeliveredAt()).isEqualTo(Instant.now(FIXED_CLOCK));
-        assertThat(event.getKafkaDeliveredAt()).isEqualTo(Instant.now(FIXED_CLOCK));
+        assertThat(delivered).isEqualTo(1);
+        verify(outboxEventRepository).markKafkaDelivered(event.getId(), NOW);
+        verify(outboxEventRepository, never()).markMongoDelivered(any(), any());
+        verify(tradeEventRepository, never()).save(any(TradeEventDocument.class));
     }
 
     @Test
-    void deliverPendingEvents_WhenMongoFails_StillPublishesToKafkaAndLeavesMongoPending() {
-        OutboxEventEntity event = event(TradeEventType.EXPIRED);
-        when(outboxEventRepository.findUndelivered(Limit.of(200))).thenReturn(List.of(event));
+    void deliverPendingEvents_WhenKafkaIsDown_StillDeliversEveryMongoEventAndStopsKafkaAfterFirstFailure() {
+        OutboxEventEntity created = event(TradeEventType.CREATED);
+        OutboxEventEntity expired1 = event(TradeEventType.EXPIRED);
+        OutboxEventEntity expired2 = event(TradeEventType.EXPIRED);
+        when(outboxEventRepository.findPendingMongoDelivery(BATCH)).thenReturn(List.of(created));
+        when(outboxEventRepository.findPendingKafkaDelivery(BATCH)).thenReturn(List.of(expired1, expired2));
+        when(kafkaTemplate.send(anyString(), anyString(), anyString()))
+                .thenReturn(CompletableFuture.failedFuture(new KafkaException("Kafka unavailable")));
+
+        int delivered = relay.deliverPendingEvents();
+
+        assertThat(delivered).isEqualTo(1);
+        verify(outboxEventRepository).markMongoDelivered(created.getId(), NOW);
+        verify(kafkaTemplate, times(1)).send(anyString(), anyString(), anyString());
+        verify(outboxEventRepository, never()).markKafkaDelivered(any(), any());
+    }
+
+    @Test
+    void deliverPendingEvents_WhenMongoIsDown_StopsMongoAfterFirstFailureAndStillPublishesToKafka() {
+        OutboxEventEntity first = event(TradeEventType.CREATED);
+        OutboxEventEntity second = event(TradeEventType.UPDATED);
+        OutboxEventEntity expired = event(TradeEventType.EXPIRED);
+        when(outboxEventRepository.findPendingMongoDelivery(BATCH)).thenReturn(List.of(first, second));
+        when(outboxEventRepository.findPendingKafkaDelivery(BATCH)).thenReturn(List.of(expired));
         when(tradeEventRepository.save(any(TradeEventDocument.class)))
                 .thenThrow(new DataAccessResourceFailureException("MongoDB unavailable"));
         when(kafkaTemplate.send(anyString(), anyString(), anyString()))
                 .thenReturn(CompletableFuture.completedFuture(null));
 
-        relay.deliverPendingEvents();
+        int delivered = relay.deliverPendingEvents();
 
-        assertThat(event.getMongoDeliveredAt()).isNull();
-        assertThat(event.getKafkaDeliveredAt()).isEqualTo(Instant.now(FIXED_CLOCK));
-    }
-
-    @Test
-    void deliverPendingEvents_WhenKafkaFails_MarksMongoDeliveredAndLeavesKafkaPending() {
-        OutboxEventEntity event = event(TradeEventType.EXPIRED);
-        when(outboxEventRepository.findUndelivered(Limit.of(200))).thenReturn(List.of(event));
-        when(kafkaTemplate.send(anyString(), anyString(), anyString()))
-                .thenReturn(CompletableFuture.failedFuture(new KafkaException("Kafka unavailable")));
-
-        relay.deliverPendingEvents();
-
-        assertThat(event.getMongoDeliveredAt()).isEqualTo(Instant.now(FIXED_CLOCK));
-        assertThat(event.getKafkaDeliveredAt()).isNull();
-    }
-
-    @Test
-    void deliverPendingEvents_WhenEventAlreadyDeliveredToMongo_DoesNotUpsertAgain() {
-        OutboxEventEntity event = event(TradeEventType.EXPIRED);
-        event.setMongoDeliveredAt(Instant.parse("2026-10-13T08:00:00Z"));
-        when(outboxEventRepository.findUndelivered(Limit.of(200))).thenReturn(List.of(event));
-        when(kafkaTemplate.send(anyString(), anyString(), anyString()))
-                .thenReturn(CompletableFuture.completedFuture(null));
-
-        relay.deliverPendingEvents();
-
-        verify(tradeEventRepository, never()).save(any(TradeEventDocument.class));
-        assertThat(event.getKafkaDeliveredAt()).isEqualTo(Instant.now(FIXED_CLOCK));
+        assertThat(delivered).isEqualTo(1);
+        verify(tradeEventRepository, times(1)).save(any(TradeEventDocument.class));
+        verify(outboxEventRepository, never()).markMongoDelivered(any(), any());
+        verify(outboxEventRepository).markKafkaDelivered(expired.getId(), NOW);
     }
 
     @Test
     void deliverPendingEvents_WhenNothingPending_ReturnsZero() {
-        when(outboxEventRepository.findUndelivered(Limit.of(200))).thenReturn(List.of());
+        when(outboxEventRepository.findPendingMongoDelivery(BATCH)).thenReturn(List.of());
+        when(outboxEventRepository.findPendingKafkaDelivery(BATCH)).thenReturn(List.of());
 
         assertThat(relay.deliverPendingEvents()).isZero();
     }
