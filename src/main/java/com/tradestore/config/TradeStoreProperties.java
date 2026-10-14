@@ -4,22 +4,19 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import java.time.ZoneId;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
 /**
  * Application settings bound from the {@code trade-store} prefix.
  *
- * @param businessZone time zone that defines "today" for the maturity and expiry rules
- * @param topics       Kafka topic names
- * @param expiry       expiry scheduler settings
- * @param outbox       outbox relay settings
+ * @param topics Kafka topic names
+ * @param expiry expiry scheduler settings
+ * @param outbox outbox relay settings
  */
 @Validated
 @ConfigurationProperties(prefix = "trade-store")
 public record TradeStoreProperties(
-        @NotNull ZoneId businessZone,
         @Valid @NotNull Topics topics,
         @Valid @NotNull Expiry expiry,
         @Valid @NotNull Outbox outbox) {

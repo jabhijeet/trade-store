@@ -2,7 +2,7 @@
 
 A trade store that receives a high volume of trades (thousands, over any transmission channel), validates them, and stores each trade in a defined sequence based on its trade id and version.
 
-> **Status:** Work in progress. The repository currently contains the initial Maven project skeleton. The sections below describe the assignment and its acceptance criteria. Implementation details are added as the work proceeds.
+> **Status:** Work in progress. Kafka and REST ingestion, the validation rules, automatic expiry, the transactional outbox to MongoDB and Kafka, and the read-only query API are implemented and tested. Security, rate limiting, MongoDB projections and application metrics are planned; see [Implementation Status](docs/architecture.md#12-implementation-status).
 
 ## Problem Statement
 
@@ -37,29 +37,29 @@ Thousands of trades are sent to a single store. The store must organize and stor
 
 ## Architecture
 
-Trades are ingested primarily through Kafka, partitioned by trade id. A rate-limited, authenticated REST endpoint (`POST /api/v1/trades`) is available as a backup when Kafka is unavailable and for direct ingestion. Both paths are thin adapters over one Spring Boot processing service, which applies the validation rules, guarantees idempotency and is the only writer of trade state.
+Trades are ingested primarily through Kafka, partitioned by trade id. A REST endpoint (`POST /api/v1/trades`) is available as a backup when Kafka is unavailable and for direct ingestion; authentication and rate limiting for it are planned. Both paths are thin adapters over one Spring Boot processing service, which applies the validation rules, guarantees idempotency and is the only writer of trade state.
 
-PostgreSQL holds the authoritative trade state. State changes and their events are committed together through a transactional outbox, and an outbox relay delivers the events to MongoDB (trade history and projections) and Kafka (status events). An expiry scheduler marks matured trades as expired. Read-only, paginated REST endpoints expose stored trades and their history.
+PostgreSQL holds the authoritative trade state. State changes and their events are committed together through a transactional outbox, and an outbox relay delivers the events to MongoDB (trade history) and Kafka (status events). Everything runs in UTC: "today" for the maturity and expiry rules is the current UTC date. An expiry scheduler marks matured trades as expired. Read-only, paginated REST endpoints expose stored trades and their history.
 
 See [docs/architecture.md](docs/architecture.md) for details and PlantUML diagrams.
 
 ## Technical Requirements
 
-- [ ] Java application built with **Spring Boot**
-- [ ] A **streaming tool** for trade ingestion
-- [ ] Both a **SQL** and a **NoSQL** database
-- [ ] All functionality covered by **JUnit** tests, developed using **Test-Driven Development (TDD)**
-- [ ] **Deployment pipeline** using GitHub Actions (alternatively Jenkins), including:
-  - [ ] Automated regression testing
-  - [ ] Open Source Software (OSS) vulnerability scan that **fails the build** on critical or blocker vulnerabilities
-- [ ] **PlantUML** sequence, class, and/or design diagrams where feasible
+- [x] Java application built with **Spring Boot**
+- [x] A **streaming tool** for trade ingestion (Kafka)
+- [x] Both a **SQL** and a **NoSQL** database (PostgreSQL and MongoDB)
+- [x] All functionality covered by **JUnit** tests, developed using **Test-Driven Development (TDD)**
+- [x] **Deployment pipeline** using GitHub Actions (`.github/workflows/ci.yml`), including:
+  - [x] Automated regression testing (`mvn verify`: unit and integration tests)
+  - [x] Open Source Software (OSS) vulnerability scan that **fails the build** on critical or blocker vulnerabilities (OWASP Dependency-Check, CVSS ≥ 9)
+- [x] **PlantUML** sequence, class, and/or design diagrams where feasible ([docs/diagrams](docs/diagrams))
 - [ ] If AI tools are used, all prompts are shared in a separate document
 
 ## Build and Test
 
 Prerequisites: JDK 21, Maven 3.9+, and Docker (for integration tests).
 
-Tech stack: Spring Boot 4.1, Kafka, PostgreSQL (Flyway), MongoDB, ShedLock, JUnit 5, Mockito, Testcontainers.
+Tech stack: Spring Boot 4.1, Kafka, PostgreSQL, MongoDB, Liquibase (schema migrations for both databases), ShedLock, JUnit 5, Mockito, Testcontainers.
 
 Run unit tests (`*Test`, no external services needed):
 
@@ -72,6 +72,25 @@ Run unit and integration tests (`*IT`, starts PostgreSQL, MongoDB and Kafka with
 ```shell
 mvn -f pom.xml verify
 ```
+
+The integration tests start their own containers; they do not use `compose.yml`.
+
+## Run Locally
+
+`compose.yml` starts PostgreSQL, MongoDB and Kafka on localhost with the ports and database names that `application.yml` expects:
+
+```shell
+docker compose -f compose.yml up -d
+```
+
+The application reads the PostgreSQL password from `POSTGRES_PASSWORD`. The local compose default is `tradestore`:
+
+```powershell
+$env:POSTGRES_PASSWORD = "tradestore"
+mvn -f pom.xml spring-boot:run
+```
+
+Stop with `docker compose -f compose.yml down`; add `-v` to delete the PostgreSQL and MongoDB data.
 
 ## License
 

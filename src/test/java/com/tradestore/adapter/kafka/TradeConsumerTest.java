@@ -100,6 +100,17 @@ class TradeConsumerTest {
     }
 
     @Test
+    void onTrade_WhenIdentifierLongerThanColumn_ThrowsInvalidTradeMessageException() {
+        String longId = "T".repeat(65);
+        String message = VALID_MESSAGE.replace("\"tradeId\":\"T1\"", "\"tradeId\":\"" + longId + "\"");
+
+        assertThatThrownBy(() -> consumer.onTrade(new ConsumerRecord<>("trades", 3, 42L, longId, message)))
+                .isInstanceOf(InvalidTradeMessageException.class)
+                .hasMessageContaining("tradeId");
+        verify(tradeProcessingService, never()).process(any());
+    }
+
+    @Test
     void onTrade_WhenRecordKeyDiffersFromTradeId_ThrowsInvalidTradeMessageException() {
         var record = new ConsumerRecord<>("trades", 3, 42L, "T9", VALID_MESSAGE);
 

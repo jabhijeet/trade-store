@@ -6,12 +6,13 @@ import org.springframework.context.annotation.Configuration;
 
 /**
  * Provides the clock that defines "today" for all business rules, so tests can replace it with a fixed clock.
+ * The store runs entirely in UTC: business dates, timestamps and the expiry schedule.
  */
 @Configuration
 public class ClockConfig {
 
     @Bean
-    public Clock clock(TradeStoreProperties properties) {
-        return Clock.system(properties.businessZone());
+    public Clock clock() {
+        return Clock.systemUTC();
     }
 }

@@ -1,0 +1,12 @@
+databaseChangeLog:
+  - changeSet:
+      id: 001-create-trade-events
+      author: trade-store
+      comment: Trade event history written by the outbox relay
+      changes:
+        - createCollection:
+            collectionName: trade_events
+        - createIndex:
+            collectionName: trade_events
+            keys: '{ "tradeId": 1, "occurredAt": 1 }'
+            options: '{ "name": "idx_trade_events_trade_id_occurred_at" }'

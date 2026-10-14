@@ -19,7 +19,7 @@ public class ExpiryScheduler {
     private final TradeExpiryService tradeExpiryService;
     private final Clock clock;
 
-    @Scheduled(cron = "${trade-store.expiry.cron}", zone = "${trade-store.business-zone}")
+    @Scheduled(cron = "${trade-store.expiry.cron}", zone = "UTC")
     @SchedulerLock(name = "expire-trades")
     public void run() {
         int expired = expireMaturedTrades();

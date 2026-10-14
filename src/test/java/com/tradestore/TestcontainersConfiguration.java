@@ -18,7 +18,7 @@ public class TestcontainersConfiguration {
     @Bean
     @ServiceConnection
     PostgreSQLContainer postgresContainer() {
-        return new PostgreSQLContainer("postgres:18-alpine");
+        return new PostgreSQLContainer("postgres:18");
     }
 
     @Bean
@@ -30,7 +30,7 @@ public class TestcontainersConfiguration {
     @Bean
     @ServiceConnection
     KafkaContainer kafkaContainer() {
-        return new KafkaContainer("apache/kafka-native:4.1.0");
+        return new KafkaContainer("apache/kafka:4.1.0");
     }
 
     @Bean

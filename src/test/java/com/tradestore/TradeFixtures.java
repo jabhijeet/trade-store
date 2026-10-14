@@ -7,23 +7,23 @@ import com.tradestore.persistence.sql.TradeEntity;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.ZoneId;
+import java.time.ZoneOffset;
 
 /**
  * Shared test data. All tests run against a fixed business date, {@link #TODAY}.
  */
 public final class TradeFixtures {
 
-    public static final ZoneId ZONE = ZoneId.of("Europe/London");
     public static final LocalDate TODAY = LocalDate.of(2026, 10, 13);
-    public static final Clock FIXED_CLOCK = Clock.fixed(TODAY.atTime(10, 0).atZone(ZONE).toInstant(), ZONE);
+    public static final Clock FIXED_CLOCK =
+            Clock.fixed(TODAY.atTime(10, 0).toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
     public static final LocalDate FUTURE_MATURITY = TODAY.plusYears(1);
 
     private TradeFixtures() {
     }
 
     public static TradeStoreProperties properties() {
-        return new TradeStoreProperties(ZONE,
+        return new TradeStoreProperties(
                 new TradeStoreProperties.Topics("trades", "trade-status"),
                 new TradeStoreProperties.Expiry("0 5 0 * * *", 500),
                 new TradeStoreProperties.Outbox(1000, 200));

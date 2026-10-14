@@ -1,0 +1,6 @@
+# PostgreSQL schema, applied by Spring Boot's Liquibase auto-configuration at startup.
+# Add a new numbered file under changes/ for every schema change; never edit an applied change set.
+databaseChangeLog:
+  - include:
+      file: changes/001-create-trade-store-tables.sql
+      relativeToChangelogFile: true

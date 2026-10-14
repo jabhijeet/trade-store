@@ -20,6 +20,11 @@
   <properties>
     <java.version>21</java.version>
     <shedlock.version>7.10.1</shedlock.version>
+    <!--
+      The store runs in UTC. TradeStoreApplication.main sets the JVM default zone; test JVMs never call main, so
+      Surefire and Failsafe set it here.
+    -->
+    <argLine>-Duser.timezone=UTC</argLine>
   </properties>
 
   <dependencies>
@@ -43,18 +48,10 @@
       <artifactId>spring-boot-starter-kafka</artifactId>
     </dependency>
 
-    <!-- SQL: PostgreSQL with Flyway migrations -->
+    <!-- SQL: PostgreSQL -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-data-jpa</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-flyway</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.flywaydb</groupId>
-      <artifactId>flyway-database-postgresql</artifactId>
     </dependency>
     <dependency>
       <groupId>org.postgresql</groupId>
@@ -66,6 +63,17 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-data-mongodb</artifactId>
+    </dependency>
+
+    <!-- Schema migrations for both databases: Liquibase core (PostgreSQL) and its MongoDB extension -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-liquibase</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.liquibase.ext</groupId>
+      <artifactId>liquibase-mongodb</artifactId>
+      <version>${liquibase.version}</version>
     </dependency>
 
     <!-- Distributed locks for scheduled jobs -->

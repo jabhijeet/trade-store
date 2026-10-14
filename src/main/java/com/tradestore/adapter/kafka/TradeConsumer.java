@@ -24,6 +24,9 @@ import tools.jackson.databind.json.JsonMapper;
 @RequiredArgsConstructor
 public class TradeConsumer {
 
+    /** Matches the {@code VARCHAR(64)} identifier columns and the REST request limits. */
+    static final int MAX_IDENTIFIER_LENGTH = 64;
+
     private final TradeProcessingService tradeProcessingService;
     private final JsonMapper jsonMapper;
 
@@ -74,16 +77,16 @@ public class TradeConsumer {
         }
 
         List<String> invalidFields = new ArrayList<>();
-        if (isBlank(message.tradeId())) {
+        if (isInvalidIdentifier(message.tradeId())) {
             invalidFields.add("tradeId");
         }
         if (message.version() == null || message.version() < 1) {
             invalidFields.add("version");
         }
-        if (isBlank(message.counterPartyId())) {
+        if (isInvalidIdentifier(message.counterPartyId())) {
             invalidFields.add("counterPartyId");
         }
-        if (isBlank(message.bookId())) {
+        if (isInvalidIdentifier(message.bookId())) {
             invalidFields.add("bookId");
         }
         if (message.maturityDate() == null) {
@@ -97,7 +100,10 @@ public class TradeConsumer {
                 message.maturityDate());
     }
 
-    private static boolean isBlank(String value) {
-        return value == null || value.isBlank();
+    /**
+     * Identifiers must fit their database columns; an oversized value would otherwise fail on every retry.
+     */
+    private static boolean isInvalidIdentifier(String value) {
+        return value == null || value.isBlank() || value.length() > MAX_IDENTIFIER_LENGTH;
     }
 }

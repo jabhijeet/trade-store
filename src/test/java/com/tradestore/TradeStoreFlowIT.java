@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.context.TestPropertySource;
 
@@ -36,9 +37,21 @@ class TradeStoreFlowIT {
     private TradeJpaRepository tradeRepository;
     @Autowired
     private TradeEventMongoRepository tradeEventRepository;
+    @Autowired
+    private JdbcClient jdbcClient;
 
+    /**
+     * Waits for the relay to deliver the previous test's events before clearing both stores. Otherwise an event
+     * still pending in the outbox (for example a {@code REPLACED} event for a trade id reused by the next test) would
+     * reach MongoDB after the cleanup and appear in the next test's history.
+     */
     @BeforeEach
     void cleanUp() {
+        await().atMost(TIMEOUT).until(() -> jdbcClient
+                .sql("SELECT count(*) FROM outbox_event WHERE mongo_delivered_at IS NULL")
+                .query(Long.class).single() == 0);
+        jdbcClient.sql("DELETE FROM outbox_event").update();
+        jdbcClient.sql("DELETE FROM processed_message").update();
         tradeRepository.deleteAll();
         tradeEventRepository.deleteAll();
     }

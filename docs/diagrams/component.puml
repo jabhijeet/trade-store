@@ -1,16 +1,21 @@
 @startuml component
 title Trade Store - Component View
 
+skinparam component<<planned>> {
+  BorderStyle dashed
+  FontColor #777777
+}
+
 actor "Trade Producers" as producers
 actor "Clients" as clients
 
 queue "Kafka\n(trades topic,\nkey = trade id)" as kafka
-queue "Kafka\n(trades dead-letter topic)" as dlt
+queue "Kafka\n(trades-dlt topic)" as dlt
 queue "Kafka\n(trade-status topic)" as statusTopic
 
 node "Spring Boot Trade Store App" as app {
-  component "Security\n(OAuth2 JWT)" as security
-  component "Rate Limiter\n(Bucket4j, per client)" as rateLimiter
+  component "Security\n(OAuth2 JWT)" <<planned>> as security
+  component "Rate Limiter\n(Bucket4j, per client)" <<planned>> as rateLimiter
   component "Trade Ingestion API\nPOST /api/v1/trades\n(backup / direct)" as ingestionApi
   component "Trade Consumer\n(primary ingestion)" as consumer
   component "Trade Processing Service\n(idempotency, validation rules,\nversion check, outbox write)" as processing
@@ -22,25 +27,31 @@ node "Spring Boot Trade Store App" as app {
 }
 
 database "PostgreSQL\n(trades, processed_message,\noutbox_event, shedlock)" as postgres
-database "MongoDB\n(trade_events, projections)" as mongo
+database "MongoDB\n(trade_events;\nprojections planned)" as mongo
 
 producers --> kafka : publish trades (primary)
 producers --> security : POST /api/v1/trades (backup / direct)
-security --> rateLimiter
-rateLimiter --> ingestionApi : admitted requests
+security ..> rateLimiter
+rateLimiter ..> ingestionApi : admitted requests
 kafka --> consumer : ordered per partition
-consumer --> dlt : poison messages
+consumer --> dlt : invalid messages,\nretries exhausted
 consumer --> processing
 ingestionApi --> processing
 processing --> rules
 processing --> postgres : state + idempotency + outbox\n(one transaction)
 scheduler --> postgres : mark expired + outbox\n(one transaction)
 relay --> postgres : read undelivered events
-relay --> mongo : upsert events, update projections
+relay --> mongo : upsert events
 relay --> statusTopic : trade expired events
 clients --> security : GET /api/v1/trades ...
-security --> queryApi
+security ..> queryApi
 queryApi --> postgres : current trades
-queryApi --> mongo : history / projections
+queryApi --> mongo : history
 monitoring ..> app : observes
+
+note bottom of security
+  Dashed components are planned.
+  Until they exist, requests reach the
+  ingestion and query APIs directly.
+end note
 @enduml
