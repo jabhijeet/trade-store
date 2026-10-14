@@ -14,18 +14,17 @@ import lombok.AllArgsConstructor;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
-import lombok.Setter;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 /**
  * A trade event committed in the same transaction as the state change it describes, awaiting delivery to
- * MongoDB and, for {@link TradeEventType#EXPIRED} events, to Kafka.
+ * MongoDB and, for {@link TradeEventType#EXPIRED} events, to Kafka. Delivery times are set only through
+ * {@link OutboxEventRepository}'s per-destination updates.
  */
 @Entity
 @Table(name = "outbox_event")
 @Getter
-@Setter
 @NoArgsConstructor
 @AllArgsConstructor
 @EqualsAndHashCode(onlyExplicitlyIncluded = true)
@@ -65,11 +64,4 @@ public class OutboxEventEntity {
 
     @Column(name = "kafka_delivered_at")
     private Instant kafkaDeliveredAt;
-
-    /**
-     * Whether this event must also be published to the {@code trade-status} topic.
-     */
-    public boolean requiresKafkaDelivery() {
-        return type == TradeEventType.EXPIRED;
-    }
 }

@@ -21,6 +21,14 @@
     <java.version>21</java.version>
     <shedlock.version>7.10.1</shedlock.version>
     <!--
+      Overrides of Spring Boot 4.1.1 managed versions for known vulnerabilities, until a Boot release includes them.
+      Tomcat 11.0.24 is affected by CVE-2026-65637, CVE-2026-73180 and others, which are fixed in 11.0.25. MongoDB
+      Java driver 5.8.1 is affected by CVE-2026-18710 (fixed in 5.9.2) and by CVE-2026-88032 and CVE-2026-88033
+      (fixed in 5.11.1). Remove these when the Boot parent manages these or later versions.
+    -->
+    <tomcat.version>11.0.27</tomcat.version>
+    <mongodb.version>5.13.0</mongodb.version>
+    <!--
       The store runs in UTC. TradeStoreApplication.main sets the JVM default zone; test JVMs never call main, so
       Surefire and Failsafe set it here.
     -->

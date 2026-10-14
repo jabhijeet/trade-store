@@ -15,8 +15,9 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Records a rejected trade in its own transaction, so the rejection survives the rollback of the processing
- * transaction.
+ * Records a rejected trade in the processing transaction. Rejections are thrown before anything else is written,
+ * and {@link TradeProcessingService#process} commits instead of rolling back on a {@link TradeRejectedException},
+ * so the record is stored without a second transaction or a second pool connection.
  */
 @Slf4j
 @Component
@@ -30,7 +31,7 @@ public class RejectionRecorder {
     /**
      * Stores the message id with the rejection outcome and appends a {@code REJECTED} event with the reason.
      */
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    @Transactional(propagation = Propagation.MANDATORY)
     public void record(TradeCommand command, TradeRejectedException rejection) {
         IncomingTrade trade = command.trade();
         processedMessageRepository.save(new ProcessedMessageEntity(

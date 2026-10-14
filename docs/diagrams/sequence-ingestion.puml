@@ -33,8 +33,8 @@ else valid message
       processing --> consumer : SaveOutcome
     else rule fails (maturity in past or lower version)
       rules --> processing : TradeRejectedException
-      processing -> postgres : ROLLBACK
-      processing -> postgres : new transaction: insert processed_message(REJECTED_*)\n+ outbox_event (REJECTED, reason); COMMIT
+      processing -> postgres : insert processed_message(REJECTED_*)\n+ outbox_event (REJECTED, reason)
+      processing -> postgres : COMMIT (no rollback for business rejections;\nnothing else was written)
       processing --> consumer : throw TradeRejectedException
       note right of consumer : logged, not retried\n(business rejection)
     else transient failure (database unavailable, lock timeout)

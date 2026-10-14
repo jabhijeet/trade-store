@@ -89,9 +89,9 @@ The core of the application and the only writer of trade state. Its `process(com
 
 If the same message id is processed twice concurrently, the second commit fails on the `processed_message` primary key and is retried, at which point step 1 finds the recorded outcome.
 
-On a rejection, the main transaction is rolled back and the rejection is recorded in a **separate** transaction (`RejectionRecorder`): the message id goes into `processed_message` with outcome `REJECTED_LOWER_VERSION` or `REJECTED_MATURITY_IN_PAST`, and a `REJECTED` event with the reason goes into `outbox_event`. The exception is then rethrown to the adapter, which satisfies the requirement that a lower version "generates an exception".
+On a rejection, the rejection is recorded in the **same** transaction (`RejectionRecorder`): the message id goes into `processed_message` with outcome `REJECTED_LOWER_VERSION` or `REJECTED_MATURITY_IN_PAST`, and a `REJECTED` event with the reason goes into `outbox_event`. Nothing else has been written when a rule fails, and `process` is declared `noRollbackFor = TradeRejectedException`, so the transaction commits just the rejection record, and processing a trade never needs more than one pool connection. The exception is then rethrown to the adapter, which satisfies the requirement that a lower version "generates an exception".
 
-If two first versions of the same new trade id arrive concurrently (one per ingestion path), one insert fails on the primary key. On the Kafka path the message is retried, at which point the row exists and the normal version check applies; on the REST path the request currently fails with `500` and the caller retries (see §10).
+If two first versions of the same new trade id arrive concurrently (for example one per ingestion path), there is no row to lock yet, so both pass validation and one insert fails on the primary key. The trade is written with an immediate flush, and a unique violation on a new trade id is reported as a transient `ConcurrencyFailureException`: the Kafka path retries the message and the REST path answers `503`. On retry the row exists and the normal version check applies. Other integrity violations (for example a value too long for its column) are permanent and are not retried as transient.
 
 ### 2.6 PostgreSQL
 
@@ -99,12 +99,12 @@ The **authoritative trade state** and the write-side store for idempotency and t
 
 ### 2.7 Outbox Relay
 
-A scheduled poller (single active instance via ShedLock) that reads undelivered rows from `outbox_event` in creation order and delivers them:
+A scheduled poller (single active instance via ShedLock). Each poll reads the oldest pending events **separately for each destination** (each query is backed by its own partial index) and delivers them:
 
 - **to MongoDB** – upserts the event into `trade_events` using the outbox event id as `_id`, so redelivery is idempotent (updating query projections is planned);
 - **to Kafka** – publishes `EXPIRED` events to the `trade-status` topic, keyed by trade id.
 
-Each destination is tracked separately (`mongo_delivered_at`, `kafka_delivered_at`), and failed deliveries are retried on the next poll. A short Kafka outage does not hold up MongoDB history; a long one currently can (see §10). Debezium (change data capture on the outbox table) is a drop-in alternative to the poller if lower latency is needed.
+Each destination is read, delivered and marked independently (`mongo_delivered_at`, `kafka_delivered_at`, each set by its own `UPDATE`), so an outage or backlog of one destination never holds up the other. Within a poll, the first failed delivery to a destination stops further deliveries to it until the next poll. This bounds a poll to one timeout per destination, well inside the ShedLock lease, and keeps per-trade order on `trade-status`. Failed deliveries are retried on the next poll. Debezium (change data capture on the outbox table) is a drop-in alternative to the poller if lower latency is needed.
 
 ### 2.8 MongoDB
 
@@ -252,8 +252,7 @@ Together they represent the sample table: current state plus history. Trades suc
 | Message cannot be deserialized or has an unknown schema version | Sent to the dead-letter topic, offset committed | `400 Bad Request` |
 | Business rejection (`TradeRejectedException`) | **Not retried.** Rejection recorded (§2.5), offset committed | `409` or `422` |
 | Duplicate message id | Recorded outcome reused, offset committed | Recorded outcome returned |
-| Transient failure (database unavailable, lock timeout) | Retried with exponential backoff (1 s doubling to 60 s, for up to 10 minutes). The partition is not skipped, so per-trade ordering is preserved; consumer lag grows | `503 Service Unavailable` with `Retry-After`, caller retries |
-| Primary key race on a new trade id | Retried as above | `500 Internal Server Error`, caller retries (§10) |
+| Transient failure (database unavailable, lock timeout, primary key race on a new trade id) | Retried with exponential backoff (1 s doubling to 60 s, for up to 10 minutes). The partition is not skipped, so per-trade ordering is preserved; consumer lag grows | `503 Service Unavailable` with `Retry-After`, caller retries |
 | Unexpected error after retries are exhausted | Sent to the dead-letter topic with the exception details | `500 Internal Server Error` |
 
 Business rejections are excluded from retries (configured as not-retryable in Spring Kafka's `DefaultErrorHandler`), so a rejected trade never blocks the trades behind it on the same partition.
@@ -292,9 +291,6 @@ Business rejections are excluded from retries (configured as not-retryable in Sp
 ## 10. Known Limitations
 
 - With in-memory Bucket4j buckets (once implemented), the rate limit is per instance; an exact global limit needs the Redis-backed store.
-- **Outbox backlog during a long Kafka outage** – the relay reads the oldest events that have *any* destination pending. If Kafka is down while a full batch of `EXPIRED` events is waiting for it, every poll reads the same events, each waiting for the Kafka send timeout, and newer events do not reach MongoDB until Kafka recovers.
-- **Primary key race on the REST path** – when two first versions of a new trade id are stored concurrently, the losing REST request gets `500` instead of `503`.
-- **Connections per rejection** – recording a rejection uses a second transaction, and so a second pool connection, while the processing transaction is still open. Listener concurrency plus REST threads must stay well below the PostgreSQL pool size.
 - MongoDB history is eventually consistent with PostgreSQL, behind by up to one relay poll interval.
 - Between scheduler runs, a trade whose maturity date has just passed is still shown as not expired. Running the scheduler shortly after midnight keeps this window small.
 - When the same trade id and version arrive on both paths with different contents, which one is kept depends on commit order.
@@ -318,6 +314,10 @@ Mocks can show that the code calls MongoDB after PostgreSQL, but not that the tw
 | Same message delivered twice | One trade, one processed message, one outbox event, one history event |
 | PostgreSQL transaction fails part-way | No trade, no outbox event, no processed message, no history |
 | Kafka down during expiry | History reaches MongoDB; the status event stays pending and is published after recovery |
+| Kafka down with more pending status events than one relay batch | Newer events still reach MongoDB; all status events are published after recovery |
+| Two first versions of a new trade id stored concurrently | The loser gets a transient `ConcurrencyFailureException`; its retry is applied as a same-version replacement |
+
+`RejectionSingleConnectionIT` runs with a one-connection PostgreSQL pool and proves that rejections are recorded without a second connection.
 
 Integration tests start their own containers with Testcontainers (`TestcontainersConfiguration`), using the same images as `compose.yml`. Test JVMs run with `-Duser.timezone=UTC` (set in `pom.xml`).
 
@@ -329,7 +329,7 @@ Integration tests start their own containers with Testcontainers (`Testcontainer
 | REST ingestion with idempotency key, problem-detail errors | Implemented |
 | Validation rules (maturity date, version), rejection recording | Implemented |
 | PostgreSQL state, idempotency table, transactional outbox | Implemented |
-| Outbox relay to MongoDB history and the `trade-status` topic | Implemented (see the backlog limitation in §10) |
+| Outbox relay to MongoDB history and the `trade-status` topic | Implemented |
 | Expiry scheduler with ShedLock | Implemented |
 | Read-only query API (trades, trade, history) | Implemented |
 | Liquibase migrations for PostgreSQL and MongoDB, connection pools | Implemented |
