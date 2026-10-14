@@ -67,7 +67,7 @@ A thin adapter (`TradeConsumer`). It reads the record value as a string, parses 
 | Malformed request | `400 Bad Request` |
 | Missing or invalid token / token without `trades:write` | `401 Unauthorized` / `403 Forbidden` |
 | Lower version than stored | `409 Conflict` |
-| Maturity date earlier than today | `422 Unprocessable Entity` |
+| Maturity date earlier than today | `422 Unprocessable Content` |
 | Body without `Content-Length` | `411 Length Required` |
 | Body larger than `trade-store.rest.max-request-size` (16 KB) | `413 Content Too Large` |
 | Rate limit exceeded | `429 Too Many Requests` with `Retry-After` |

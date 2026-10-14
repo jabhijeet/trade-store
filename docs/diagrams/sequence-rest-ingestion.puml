@@ -39,7 +39,7 @@ else authenticated (trades:write)
         api --> producer : 409 Conflict
       else MaturityDateInPastException
         processing --> api : exception (rejection recorded)
-        api --> producer : 422 Unprocessable Entity
+        api --> producer : 422 Unprocessable Content
       else database unavailable
         processing --> api : transient exception
         api --> producer : 503 Service Unavailable (Retry-After)
