@@ -1,11 +1,6 @@
 @startuml component
 title Trade Store - Component View
 
-skinparam component<<planned>> {
-  BorderStyle dashed
-  FontColor #777777
-}
-
 actor "Trade Producers" as producers
 actor "Clients" as clients
 
@@ -14,8 +9,8 @@ queue "Kafka\n(trades-dlt topic)" as dlt
 queue "Kafka\n(trade-status topic)" as statusTopic
 
 node "Spring Boot Trade Store App" as app {
-  component "Security\n(OAuth2 JWT)" <<planned>> as security
-  component "Rate Limiter\n(Bucket4j, per client)" <<planned>> as rateLimiter
+  component "Security\n(OAuth2 resource server,\nJWT scopes)" as security
+  component "Ingestion Limits\n(Bucket4j rate limiter per client,\nrequest size)" as rateLimiter
   component "Trade Ingestion API\nPOST /api/v1/trades\n(backup / direct)" as ingestionApi
   component "Trade Consumer\n(primary ingestion)" as consumer
   component "Trade Processing Service\n(idempotency, validation rules,\nversion check, outbox write)" as processing
@@ -23,16 +18,19 @@ node "Spring Boot Trade Store App" as app {
   component "Expiry Scheduler\n(ShedLock)" as scheduler
   component "Outbox Relay\n(ShedLock)" as relay
   component "Trade Query API\n(read only, paginated)" as queryApi
-  component "Monitoring\n(Actuator, Micrometer)" as monitoring
+  component "Purge Job\n(ShedLock)" as purge
+  component "Monitoring\n(Actuator, Micrometer,\nECS JSON logs)" as monitoring
 }
 
 database "PostgreSQL\n(trades, processed_message,\noutbox_event, shedlock)" as postgres
-database "MongoDB\n(trade_events;\nprojections planned)" as mongo
+database "MongoDB\n(trade_events, trade_views)" as mongo
+node "OAuth2 Issuer\n(Keycloak locally)" as issuer
 
 producers --> kafka : publish trades (primary)
 producers --> security : POST /api/v1/trades (backup / direct)
-security ..> rateLimiter
-rateLimiter ..> ingestionApi : admitted requests
+security --> rateLimiter
+security ..> issuer : signing keys (JWKS)
+rateLimiter --> ingestionApi : admitted requests
 kafka --> consumer : ordered per partition
 consumer --> dlt : invalid messages,\nretries exhausted
 consumer --> processing
@@ -41,17 +39,12 @@ processing --> rules
 processing --> postgres : state + idempotency + outbox\n(one transaction)
 scheduler --> postgres : mark expired + outbox\n(one transaction)
 relay --> postgres : read undelivered events
-relay --> mongo : upsert events
+relay --> mongo : upsert events,\nupdate trade_views
+purge --> postgres : delete old processed_message
 relay --> statusTopic : trade expired events
-clients --> security : GET /api/v1/trades ...
-security ..> queryApi
+clients --> security : GET /api/v1/trades ...,\nGET /api/v1/books/{bookId}/trades
+security --> queryApi
 queryApi --> postgres : current trades
-queryApi --> mongo : history
+queryApi --> mongo : history,\ntrades by book
 monitoring ..> app : observes
-
-note bottom of security
-  Dashed components are planned.
-  Until they exist, requests reach the
-  ingestion and query APIs directly.
-end note
 @enduml

@@ -3,6 +3,7 @@ package com.tradestore.service;
 import com.tradestore.config.TradeStoreProperties;
 import com.tradestore.persistence.mongo.TradeEventDocument;
 import com.tradestore.persistence.mongo.TradeEventMongoRepository;
+import com.tradestore.persistence.mongo.TradeViewProjector;
 import com.tradestore.persistence.sql.OutboxEventEntity;
 import com.tradestore.persistence.sql.OutboxEventRepository;
 import java.time.Clock;
@@ -26,7 +27,8 @@ import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Delivers outbox events to MongoDB (all events) and to the {@code trade-status} topic ({@code EXPIRED} events).
+ * Delivers outbox events to MongoDB (all events, into the history and the {@code trade_views} projection) and to
+ * the {@code trade-status} topic ({@code EXPIRED} events).
  * <p>
  * Each destination is read, delivered and marked independently, so an outage of one never holds up the other.
  * Within a poll, the first failure for a destination stops further deliveries to it until the next poll: that bounds
@@ -44,6 +46,7 @@ public class OutboxRelay {
 
     private final OutboxEventRepository outboxEventRepository;
     private final TradeEventMongoRepository tradeEventRepository;
+    private final TradeViewProjector tradeViewProjector;
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final JsonMapper jsonMapper;
     private final TradeStoreProperties properties;
@@ -85,6 +88,7 @@ public class OutboxRelay {
     private boolean deliverToMongo(OutboxEventEntity event) {
         try {
             tradeEventRepository.save(toDocument(event));
+            tradeViewProjector.apply(event.getType(), event.getPayload());
         } catch (DataAccessException exception) {
             log.warn("MongoDB delivery failed, will retry next poll: eventId={}, tradeId={}, error={}",
                     event.getId(), event.getTradeId(), exception.getMessage());

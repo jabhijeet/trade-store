@@ -25,6 +25,14 @@ spring:
     change-log: classpath:db/changelog/postgres/db.changelog-master.yaml
   mongodb:
     uri: ${MONGODB_URI:mongodb://localhost:27017/tradestore}
+  # REST endpoints accept JWT bearer tokens from this issuer. The signing keys are fetched lazily, on the first
+  # request, so the application starts even when the issuer is not reachable yet. The default matches the
+  # Keycloak realm in compose.yml.
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OAUTH2_ISSUER_URI:http://localhost:8180/realms/trade-store}
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     consumer:
@@ -63,9 +71,26 @@ trade-store:
   outbox:
     poll-interval-ms: 1000
     batch-size: 200
+  # REST ingestion limits. Buckets are held in memory, so the rate applies per client and per instance:
+  # set it to the desired global rate divided by the number of instances.
+  rest:
+    requests-per-second: ${REST_REQUESTS_PER_SECOND:100}
+    max-request-size: 16KB
+  # Processed message ids are kept longer than the Kafka retention period (7 days by default), so a
+  # redelivered message is still recognised as a duplicate.
+  purge:
+    cron: "0 30 0 * * *"
+    processed-message-retention: 14d
+    batch-size: 1000
 
 management:
   endpoints:
     web:
       exposure:
         include: health,info,metrics
+
+# Structured JSON logs (Elastic Common Schema). MDC entries and key-value pairs are included as fields.
+logging:
+  structured:
+    format:
+      console: ecs

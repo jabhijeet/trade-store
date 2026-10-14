@@ -1,0 +1,55 @@
+{
+  "realm": "trade-store",
+  "enabled": true,
+  "accessTokenLifespan": 300,
+  "clientScopes": [
+    {
+      "name": "trades:write",
+      "description": "Submit trades to POST /api/v1/trades",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "trades:read",
+      "description": "Read trades and their history",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "trade-producer",
+      "description": "Local development only: upstream system that submits and reads trades",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "trade-producer-local-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["trades:write", "trades:read"],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "trade-reader",
+      "description": "Local development only: downstream system that only reads trades",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "trade-reader-local-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["trades:read"],
+      "optionalClientScopes": []
+    }
+  ]
+}

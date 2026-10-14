@@ -1,0 +1,12 @@
+databaseChangeLog:
+  - changeSet:
+      id: 002-create-trade-views
+      author: trade-store
+      comment: Current-state projection of each trade, maintained by the outbox relay and read by book
+      changes:
+        - createCollection:
+            collectionName: trade_views
+        - createIndex:
+            collectionName: trade_views
+            keys: '{ "bookId": 1, "_id": 1 }'
+            options: '{ "name": "idx_trade_views_book_id" }'

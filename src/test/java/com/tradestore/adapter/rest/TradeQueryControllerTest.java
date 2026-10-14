@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -23,13 +24,17 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.JwtRequestPostProcessor;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
-@WebMvcTest(TradeQueryController.class)
+@WebMvcTest({TradeQueryController.class, BookQueryController.class})
+@Import(RestSliceTestConfiguration.class)
 class TradeQueryControllerTest {
 
     @Autowired
@@ -42,7 +47,7 @@ class TradeQueryControllerTest {
     void getTrade_WhenFound_Returns200WithTrade() throws Exception {
         when(tradeQueryService.findTrade("T1")).thenReturn(Optional.of(stored("T1", 1)));
 
-        mockMvc.perform(get("/api/v1/trades/T1"))
+        mockMvc.perform(get("/api/v1/trades/T1").with(reader()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.tradeId").value("T1"))
                 .andExpect(jsonPath("$.version").value(1))
@@ -53,7 +58,7 @@ class TradeQueryControllerTest {
     void getTrade_WhenNotFound_Returns404() throws Exception {
         when(tradeQueryService.findTrade("T9")).thenReturn(Optional.empty());
 
-        mockMvc.perform(get("/api/v1/trades/T9"))
+        mockMvc.perform(get("/api/v1/trades/T9").with(reader()))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.status").value(404));
     }
@@ -63,7 +68,7 @@ class TradeQueryControllerTest {
         when(tradeQueryService.findTrades(any(), any()))
                 .thenReturn(new PageImpl<>(List.of(stored("T1", 1)), PageRequest.of(0, 10), 1));
 
-        mockMvc.perform(get("/api/v1/trades")
+        mockMvc.perform(get("/api/v1/trades").with(reader())
                         .param("bookId", "B1")
                         .param("expired", "false")
                         .param("page", "0")
@@ -88,10 +93,38 @@ class TradeQueryControllerTest {
         when(tradeQueryService.findHistory(eq("T2"), any()))
                 .thenReturn(new PageImpl<>(List.of(event), PageRequest.of(0, 50), 1));
 
-        mockMvc.perform(get("/api/v1/trades/T2/history"))
+        mockMvc.perform(get("/api/v1/trades/T2/history").with(reader()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.content[0].id").value("e1"))
                 .andExpect(jsonPath("$.content[0].type").value("CREATED"))
                 .andExpect(jsonPath("$.content[0].payload.bookId").value("B1"));
+    }
+
+    @Test
+    void getBookTrades_ReturnsTradesOfBookFromProjection() throws Exception {
+        when(tradeQueryService.findTradesByBook(eq("B1"), any()))
+                .thenReturn(new PageImpl<>(List.of(stored("T1", 1)), PageRequest.of(0, 50), 1));
+
+        mockMvc.perform(get("/api/v1/books/B1/trades").with(reader()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].tradeId").value("T1"))
+                .andExpect(jsonPath("$.content[0].bookId").value("B1"))
+                .andExpect(jsonPath("$.totalElements").value(1));
+    }
+
+    @Test
+    void getTrade_WhenNoToken_Returns401() throws Exception {
+        mockMvc.perform(get("/api/v1/trades/T1")).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void getTrade_WhenTokenLacksReadScope_Returns403() throws Exception {
+        mockMvc.perform(get("/api/v1/trades/T1")
+                        .with(jwt().authorities(new SimpleGrantedAuthority("SCOPE_trades:write"))))
+                .andExpect(status().isForbidden());
+    }
+
+    private static JwtRequestPostProcessor reader() {
+        return jwt().authorities(new SimpleGrantedAuthority("SCOPE_trades:read"));
     }
 }

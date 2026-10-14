@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -21,13 +22,17 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.JwtRequestPostProcessor;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 
 @WebMvcTest(TradeIngestionController.class)
+@Import(RestSliceTestConfiguration.class)
 class TradeIngestionControllerTest {
 
     private static final String VALID_BODY = """
@@ -74,6 +79,7 @@ class TradeIngestionControllerTest {
         when(tradeProcessingService.process(any())).thenReturn(SaveOutcome.CREATED);
 
         mockMvc.perform(post("/api/v1/trades")
+                        .with(producer())
                         .contentType(MediaType.APPLICATION_JSON)
                         .header("Idempotency-Key", "abc-123")
                         .content(VALID_BODY))
@@ -145,8 +151,34 @@ class TradeIngestionControllerTest {
         postTrade(VALID_BODY).andExpect(status().isServiceUnavailable());
     }
 
+    @Test
+    void ingestTrade_WhenNoToken_Returns401WithoutProcessing() throws Exception {
+        mockMvc.perform(post("/api/v1/trades").contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
+                .andExpect(status().isUnauthorized());
+
+        verify(tradeProcessingService, never()).process(any());
+    }
+
+    @Test
+    void ingestTrade_WhenTokenLacksWriteScope_Returns403WithoutProcessing() throws Exception {
+        mockMvc.perform(post("/api/v1/trades")
+                        .with(jwt().authorities(new SimpleGrantedAuthority("SCOPE_trades:read")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(VALID_BODY))
+                .andExpect(status().isForbidden());
+
+        verify(tradeProcessingService, never()).process(any());
+    }
+
     private ResultActions postTrade(String body) throws Exception {
-        return mockMvc.perform(post("/api/v1/trades").contentType(MediaType.APPLICATION_JSON).content(body));
+        return mockMvc.perform(post("/api/v1/trades")
+                .with(producer())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body));
+    }
+
+    private static JwtRequestPostProcessor producer() {
+        return jwt().authorities(new SimpleGrantedAuthority("SCOPE_trades:write"));
     }
 
     private TradeCommand capturedCommand() {

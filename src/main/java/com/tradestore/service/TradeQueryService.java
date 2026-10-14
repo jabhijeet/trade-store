@@ -5,6 +5,8 @@ import com.tradestore.domain.TradeFilter;
 import com.tradestore.domain.TradeHistoryEvent;
 import com.tradestore.persistence.mongo.TradeEventDocument;
 import com.tradestore.persistence.mongo.TradeEventMongoRepository;
+import com.tradestore.persistence.mongo.TradeViewDocument;
+import com.tradestore.persistence.mongo.TradeViewMongoRepository;
 import com.tradestore.persistence.sql.TradeEntity;
 import com.tradestore.persistence.sql.TradeJpaRepository;
 import java.util.ArrayList;
@@ -18,7 +20,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Read side: current trades from PostgreSQL, history from MongoDB.
+ * Read side: current trades from PostgreSQL, history and the by-book projection from MongoDB.
  */
 @Service
 @RequiredArgsConstructor
@@ -27,6 +29,7 @@ public class TradeQueryService {
 
     private final TradeJpaRepository tradeRepository;
     private final TradeEventMongoRepository tradeEventRepository;
+    private final TradeViewMongoRepository tradeViewRepository;
 
     public Optional<Trade> findTrade(String tradeId) {
         return tradeRepository.findById(tradeId).map(TradeEntity::toDomain);
@@ -51,8 +54,21 @@ public class TradeQueryService {
                 .map(TradeQueryService::toHistoryEvent);
     }
 
+    /**
+     * Trades of a book from the {@code trade_views} projection. Eventually consistent: a change becomes visible here
+     * one outbox relay poll after it is committed to PostgreSQL. Keeps book-level read traffic off PostgreSQL.
+     */
+    public Page<Trade> findTradesByBook(String bookId, Pageable pageable) {
+        return tradeViewRepository.findByBookId(bookId, pageable).map(TradeQueryService::toTrade);
+    }
+
     private static Specification<TradeEntity> attributeEquals(String attribute, Object value) {
         return (root, query, builder) -> builder.equal(root.get(attribute), value);
+    }
+
+    private static Trade toTrade(TradeViewDocument view) {
+        return new Trade(view.tradeId(), view.version(), view.counterPartyId(), view.bookId(), view.maturityDate(),
+                view.createdDate(), view.expired());
     }
 
     private static TradeHistoryEvent toHistoryEvent(TradeEventDocument document) {

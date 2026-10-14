@@ -16,6 +16,7 @@ import com.tradestore.domain.EventSource;
 import com.tradestore.domain.TradeEventType;
 import com.tradestore.persistence.mongo.TradeEventDocument;
 import com.tradestore.persistence.mongo.TradeEventMongoRepository;
+import com.tradestore.persistence.mongo.TradeViewProjector;
 import com.tradestore.persistence.sql.OutboxEventEntity;
 import com.tradestore.persistence.sql.OutboxEventRepository;
 import java.time.Instant;
@@ -47,13 +48,15 @@ class OutboxRelayTest {
     @Mock
     private TradeEventMongoRepository tradeEventRepository;
     @Mock
+    private TradeViewProjector tradeViewProjector;
+    @Mock
     private KafkaTemplate<String, String> kafkaTemplate;
 
     private OutboxRelay relay;
 
     @BeforeEach
     void setUp() {
-        relay = new OutboxRelay(outboxEventRepository, tradeEventRepository, kafkaTemplate,
+        relay = new OutboxRelay(outboxEventRepository, tradeEventRepository, tradeViewProjector, kafkaTemplate,
                 JsonMapper.builder().build(), properties(), FIXED_CLOCK);
     }
 
@@ -72,6 +75,7 @@ class OutboxRelayTest {
         assertThat(document.tradeId()).isEqualTo("T1");
         assertThat(document.type()).isEqualTo(TradeEventType.CREATED);
         assertThat(document.payload()).containsEntry("bookId", "B1");
+        verify(tradeViewProjector).apply(TradeEventType.CREATED, event.getPayload());
         verify(outboxEventRepository).markMongoDelivered(event.getId(), NOW);
         verify(outboxEventRepository, never()).markKafkaDelivered(any(), any());
         verify(kafkaTemplate, never()).send(anyString(), anyString(), anyString());

@@ -1,5 +1,6 @@
 package com.tradestore.service;
 
+import com.tradestore.domain.EventSource;
 import com.tradestore.domain.IncomingTrade;
 import com.tradestore.domain.LowerVersionTradeException;
 import com.tradestore.domain.MaturityDateInPastException;
@@ -9,6 +10,7 @@ import com.tradestore.domain.Trade;
 import com.tradestore.domain.TradeCommand;
 import com.tradestore.domain.TradeEventType;
 import com.tradestore.domain.TradeRejectedException;
+import com.tradestore.observability.TradeMetrics;
 import com.tradestore.persistence.sql.ProcessedMessageEntity;
 import com.tradestore.persistence.sql.ProcessedMessageRepository;
 import com.tradestore.persistence.sql.TradeEntity;
@@ -26,6 +28,8 @@ import org.springframework.dao.ConcurrencyFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * The only writer of trade state. Used by both ingestion paths (Kafka and REST).
@@ -43,6 +47,7 @@ public class TradeProcessingService {
     private final List<TradeValidationRule> rules;
     private final OutboxWriter outboxWriter;
     private final RejectionRecorder rejectionRecorder;
+    private final TradeMetrics metrics;
     private final Clock clock;
 
     /**
@@ -65,6 +70,7 @@ public class TradeProcessingService {
         if (processed.isPresent()) {
             log.info("Duplicate message ignored: messageId={}, outcome={}",
                     command.messageId(), processed.get().getOutcome());
+            countAfterCommit(command.source(), TradeMetrics.DUPLICATE_OUTCOME);
             return replayOutcome(command, processed.get().getOutcome());
         }
 
@@ -84,6 +90,7 @@ public class TradeProcessingService {
                 trade.toDomain());
         processedMessageRepository.save(new ProcessedMessageEntity(
                 command.messageId(), incoming.tradeId(), messageOutcome(outcome), Instant.now(clock)));
+        countAfterCommit(command.source(), messageOutcome(outcome).name());
         log.info("Trade stored: tradeId={}, version={}, outcome={}, source={}, messageId={}",
                 incoming.tradeId(), incoming.version(), outcome, command.source(), command.messageId());
         return outcome;
@@ -123,8 +130,26 @@ public class TradeProcessingService {
             rules.forEach(rule -> rule.validate(command.trade(), current, today));
         } catch (TradeRejectedException rejection) {
             rejectionRecorder.record(command, rejection);
+            countAfterCommit(command.source(), rejection.outcome().name());
             throw rejection;
         }
+    }
+
+    /**
+     * Counts the outcome once the transaction has committed, so a transaction that fails and is retried is counted
+     * once. Rejections commit too (see {@link #process}). Without a transaction (unit tests) it counts immediately.
+     */
+    private void countAfterCommit(EventSource source, String outcome) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            metrics.tradeProcessed(source, outcome);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                metrics.tradeProcessed(source, outcome);
+            }
+        });
     }
 
     /**

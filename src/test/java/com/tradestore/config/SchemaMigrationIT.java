@@ -51,4 +51,14 @@ class SchemaMigrationIT {
         assertThat(mongoTemplate.getCollection("DATABASECHANGELOG").countDocuments(
                 new Document("id", "001-create-trade-events"))).isEqualTo(1);
     }
+
+    @Test
+    void mongoChangelog_CreatesTradeViewsCollectionWithBookIndex() {
+        assertThat(mongoTemplate.collectionExists("trade_views")).isTrue();
+
+        List<String> indexNames = mongoTemplate.getCollection("trade_views").listIndexes()
+                .map(index -> index.getString("name"))
+                .into(new ArrayList<>());
+        assertThat(indexNames).contains("idx_trade_views_book_id");
+    }
 }

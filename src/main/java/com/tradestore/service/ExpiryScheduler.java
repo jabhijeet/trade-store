@@ -1,5 +1,6 @@
 package com.tradestore.service;
 
+import com.tradestore.observability.TradeMetrics;
 import java.time.Clock;
 import java.time.LocalDate;
 import lombok.RequiredArgsConstructor;
@@ -17,6 +18,7 @@ import org.springframework.stereotype.Component;
 public class ExpiryScheduler {
 
     private final TradeExpiryService tradeExpiryService;
+    private final TradeMetrics metrics;
     private final Clock clock;
 
     @Scheduled(cron = "${trade-store.expiry.cron}", zone = "UTC")
@@ -38,6 +40,7 @@ public class ExpiryScheduler {
         do {
             expiredInBatch = tradeExpiryService.expireNextBatch(today);
             total += expiredInBatch;
+            metrics.tradesExpired(expiredInBatch);
         } while (expiredInBatch > 0);
         return total;
     }
