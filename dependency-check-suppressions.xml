@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OWASP Dependency-Check suppressions. Each entry is a reviewed false positive or a finding that does not apply to
+  how this application uses the library. Every entry has an expiry date, so the build reports it again for review.
+-->
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+
+  <suppress until="2027-04-14Z">
+    <notes><![CDATA[
+      False positive. The liquibase-mongodb extension jar is matched to the CPE of the MongoDB server
+      (cpe:/a:mongodb:mongodb) because its name contains "mongodb" and its version 5.0.3 matches a MongoDB server
+      version. The reported CVEs (CVE-2024-1351, CVE-2025-14847, ...) are MongoDB server vulnerabilities; the jar
+      contains no server code. The MongoDB Java driver it uses is scanned separately as mongodb-driver-*.
+    ]]></notes>
+    <packageUrl regex="true">^pkg:maven/org\.liquibase\.ext/liquibase-mongodb@.*$</packageUrl>
+    <cpe>cpe:/a:mongodb:mongodb</cpe>
+  </suppress>
+
+  <suppress until="2027-04-14Z">
+    <notes><![CDATA[
+      CVE-2026-41115 concerns the ACL check that the Kafka broker applies to the CONSUMER_GROUP_DESCRIBE API
+      (DESCRIBE instead of the documented READ on the GROUP resource). It is enforced by the broker, not by
+      kafka-clients, and Apache has stated that the implementation is correct and only the documentation changes,
+      so no fixed release exists (affected range 4.0.0 to 4.3.0). Mitigation is on the broker side: review consumer
+      group ACLs for least privilege.
+    ]]></notes>
+    <packageUrl regex="true">^pkg:maven/org\.apache\.kafka/kafka-clients@.*$</packageUrl>
+    <cve>CVE-2026-41115</cve>
+  </suppress>
+
+</suppressions>

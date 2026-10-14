@@ -68,7 +68,9 @@ jobs:
       # The NVD database is large; downloading it from scratch on every run is slow and rate-limited. One cache
       # entry is saved per day, and each run restores the newest entry and only fetches the changes since then.
       # The database lives in ~/.dependency-check-data, outside ~/.m2, so it is cached independently of the
-      # Maven dependency cache.
+      # Maven dependency cache. Pull requests can only restore caches saved on their own ref or on the base
+      # branch, so nvd-database.yml refreshes the entry on the default branch every day; without it, the first
+      # scan of each pull request would download the whole database.
       - name: Compute vulnerability database cache key
         id: nvd-cache-key
         run: echo "key=dependency-check-${DEPENDENCY_CHECK_VERSION}-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
@@ -81,6 +83,9 @@ jobs:
           key: ${{ steps.nvd-cache-key.outputs.key }}
           restore-keys: dependency-check-${{ env.DEPENDENCY_CHECK_VERSION }}-
 
+      # Only the analyzers this Maven project needs are enabled. The project has no JavaScript, Node or .NET code,
+      # and OSS Index needs credentials since Dependency-Check 12 (without them it only adds remote calls and
+      # errors). The build fails only on critical findings (CVSS 9.0 and above); lower findings are reported only.
       - name: Scan dependencies with OWASP Dependency-Check
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
@@ -89,6 +94,12 @@ jobs:
             org.owasp:dependency-check-maven:${DEPENDENCY_CHECK_VERSION}:check \
             -DnvdApiKeyEnvironmentVariable=NVD_API_KEY \
             -DdataDirectory="$HOME/.dependency-check-data" \
+            -DsuppressionFile=dependency-check-suppressions.xml \
+            -DossIndexAnalyzerEnabled=false \
+            -DretireJsAnalyzerEnabled=false \
+            -DnodeAnalyzerEnabled=false \
+            -DnodeAuditAnalyzerEnabled=false \
+            -DassemblyAnalyzerEnabled=false \
             -Dformats=HTML,JSON \
             -DfailBuildOnCVSS=9.0
 

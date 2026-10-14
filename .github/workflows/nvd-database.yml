@@ -1,0 +1,62 @@
+name: NVD database refresh
+
+# Downloads the NVD vulnerability database once a day on the default branch and saves it to the Actions cache.
+# Caches saved on the default branch can be restored by every branch and pull request, so the dependency scan in
+# ci.yml only fetches the changes since this run instead of the whole database. The cache key must stay the same
+# as in ci.yml.
+
+on:
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    name: Refresh NVD database cache
+    runs-on: ubuntu-latest
+    env:
+      DEPENDENCY_CHECK_VERSION: 13.0.0
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Compute vulnerability database cache key
+        id: nvd-cache-key
+        run: echo "key=dependency-check-${DEPENDENCY_CHECK_VERSION}-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vulnerability database
+        id: nvd-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.dependency-check-data
+          key: ${{ steps.nvd-cache-key.outputs.key }}
+          restore-keys: dependency-check-${{ env.DEPENDENCY_CHECK_VERSION }}-
+
+      - name: Update vulnerability database
+        if: steps.nvd-cache.outputs.cache-hit != 'true'
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          mvn --batch-mode --no-transfer-progress \
+            org.owasp:dependency-check-maven:${DEPENDENCY_CHECK_VERSION}:update-only \
+            -DnvdApiKeyEnvironmentVariable=NVD_API_KEY \
+            -DdataDirectory="$HOME/.dependency-check-data" \
+            -DossIndexAnalyzerEnabled=false
+
+      - name: Save vulnerability database
+        if: steps.nvd-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.dependency-check-data
+          key: ${{ steps.nvd-cache-key.outputs.key }}
