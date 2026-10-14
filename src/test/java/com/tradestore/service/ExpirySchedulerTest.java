@@ -7,6 +7,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.tradestore.observability.TradeMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -18,21 +20,24 @@ class ExpirySchedulerTest {
     @Mock
     private TradeExpiryService tradeExpiryService;
 
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+
     @Test
     void expireMaturedTrades_ProcessesBatchesUntilNoneRemainAndReturnsTotal() {
         when(tradeExpiryService.expireNextBatch(TODAY)).thenReturn(500, 120, 0);
-        var scheduler = new ExpiryScheduler(tradeExpiryService, FIXED_CLOCK);
+        var scheduler = new ExpiryScheduler(tradeExpiryService, new TradeMetrics(meterRegistry), FIXED_CLOCK);
 
         int total = scheduler.expireMaturedTrades();
 
         assertThat(total).isEqualTo(620);
         verify(tradeExpiryService, times(3)).expireNextBatch(TODAY);
+        assertThat(meterRegistry.counter(TradeMetrics.TRADES_EXPIRED).count()).isEqualTo(620);
     }
 
     @Test
     void expireMaturedTrades_WhenNothingMatured_ReturnsZero() {
         when(tradeExpiryService.expireNextBatch(TODAY)).thenReturn(0);
-        var scheduler = new ExpiryScheduler(tradeExpiryService, FIXED_CLOCK);
+        var scheduler = new ExpiryScheduler(tradeExpiryService, new TradeMetrics(meterRegistry), FIXED_CLOCK);
 
         assertThat(scheduler.expireMaturedTrades()).isZero();
     }

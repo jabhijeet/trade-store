@@ -19,6 +19,7 @@ import com.tradestore.domain.MessageOutcome;
 import com.tradestore.domain.SaveOutcome;
 import com.tradestore.domain.TradeCommand;
 import com.tradestore.domain.TradeEventType;
+import com.tradestore.observability.TradeMetrics;
 import com.tradestore.persistence.sql.OutboxEventEntity;
 import com.tradestore.persistence.sql.OutboxEventRepository;
 import com.tradestore.persistence.sql.ProcessedMessageEntity;
@@ -27,6 +28,7 @@ import com.tradestore.persistence.sql.TradeEntity;
 import com.tradestore.persistence.sql.TradeJpaRepository;
 import com.tradestore.validation.MaturityDateRule;
 import com.tradestore.validation.VersionRule;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
@@ -53,6 +55,7 @@ class TradeProcessingServiceTest {
     @Mock
     private OutboxEventRepository outboxEventRepository;
 
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
     private TradeProcessingService service;
 
     @BeforeEach
@@ -60,7 +63,8 @@ class TradeProcessingServiceTest {
         var outboxWriter = new OutboxWriter(outboxEventRepository, JsonMapper.builder().build(), FIXED_CLOCK);
         var rejectionRecorder = new RejectionRecorder(processedMessageRepository, outboxWriter, FIXED_CLOCK);
         service = new TradeProcessingService(tradeRepository, processedMessageRepository,
-                List.of(new MaturityDateRule(), new VersionRule()), outboxWriter, rejectionRecorder, FIXED_CLOCK);
+                List.of(new MaturityDateRule(), new VersionRule()), outboxWriter, rejectionRecorder,
+                new TradeMetrics(meterRegistry), FIXED_CLOCK);
     }
 
     @Test
@@ -116,6 +120,7 @@ class TradeProcessingServiceTest {
         assertThat(saved.isExpired()).isFalse();
         assertThat(capturedOutboxEvent().getType()).isEqualTo(TradeEventType.CREATED);
         assertThat(capturedProcessedMessage().getOutcome()).isEqualTo(MessageOutcome.CREATED);
+        assertThat(processedCount("CREATED")).isEqualTo(1);
     }
 
     @Test
@@ -162,6 +167,7 @@ class TradeProcessingServiceTest {
         OutboxEventEntity event = capturedOutboxEvent();
         assertThat(event.getType()).isEqualTo(TradeEventType.REJECTED);
         assertThat(event.getReason()).contains("lower than stored version 2");
+        assertThat(processedCount("REJECTED_LOWER_VERSION")).isEqualTo(1);
     }
 
     @Test
@@ -208,6 +214,8 @@ class TradeProcessingServiceTest {
         verify(tradeRepository, never()).saveAndFlush(any());
         verify(outboxEventRepository, never()).save(any());
         verify(processedMessageRepository, never()).save(any());
+        assertThat(processedCount(TradeMetrics.DUPLICATE_OUTCOME)).isEqualTo(1);
+        assertThat(processedCount("CREATED")).isZero();
     }
 
     @Test
@@ -221,6 +229,13 @@ class TradeProcessingServiceTest {
 
         verify(outboxEventRepository, never()).save(any());
         verify(processedMessageRepository, never()).save(any());
+    }
+
+    private double processedCount(String outcome) {
+        var counter = meterRegistry.find(TradeMetrics.TRADES_PROCESSED)
+                .tags("source", "KAFKA", "outcome", outcome)
+                .counter();
+        return counter == null ? 0 : counter.count();
     }
 
     private static TradeCommand command(IncomingTrade trade) {

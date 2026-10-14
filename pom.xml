@@ -20,6 +20,7 @@
   <properties>
     <java.version>21</java.version>
     <shedlock.version>7.10.1</shedlock.version>
+    <bucket4j.version>8.21.0</bucket4j.version>
     <!--
       Overrides of Spring Boot 4.1.1 managed versions for known vulnerabilities, until a Boot release includes them.
       Tomcat 11.0.24 is affected by CVE-2026-65637, CVE-2026-73180 and others, which are fixed in 11.0.25. MongoDB
@@ -48,6 +49,17 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <!-- REST security (OAuth2 resource server, JWT bearer tokens) and per-client rate limiting -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.bucket4j</groupId>
+      <artifactId>bucket4j_jdk17-core</artifactId>
+      <version>${bucket4j.version}</version>
     </dependency>
 
     <!-- Streaming -->
@@ -111,6 +123,11 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-webmvc-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security-test</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>

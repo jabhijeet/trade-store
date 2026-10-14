@@ -37,6 +37,16 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEventEntity, 
             """)
     List<OutboxEventEntity> findPendingKafkaDelivery(Limit limit);
 
+    @Query("select count(e) from OutboxEventEntity e where e.mongoDeliveredAt is null")
+    long countPendingMongoDelivery();
+
+    @Query("""
+            select count(e) from OutboxEventEntity e
+            where e.type = com.tradestore.domain.TradeEventType.EXPIRED
+              and e.kafkaDeliveredAt is null
+            """)
+    long countPendingKafkaDelivery();
+
     /**
      * Sets only the MongoDB delivery time, so it cannot overwrite a concurrent Kafka delivery marker.
      */

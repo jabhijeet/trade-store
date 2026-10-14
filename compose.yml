@@ -1,5 +1,6 @@
-# Local infrastructure for running the trade store: PostgreSQL, MongoDB and Kafka.
-# Images match the Testcontainers images used by the integration tests (TestcontainersConfiguration).
+# Local infrastructure for running the trade store: PostgreSQL, MongoDB, Kafka and Keycloak (token issuer).
+# The PostgreSQL, MongoDB and Kafka images match the Testcontainers images used by the integration tests
+# (TestcontainersConfiguration). Integration tests do not need Keycloak: they authenticate with mock JWTs.
 # Ports are bound to localhost only and match the defaults in application.yml.
 #
 #   docker compose up -d       start
@@ -62,6 +63,21 @@ services:
       interval: 10s
       timeout: 10s
       retries: 10
+
+  # OAuth2 token issuer for the REST API. Imports the trade-store realm with two service-account clients:
+  # trade-producer (trades:write, trades:read) and trade-reader (trades:read). Their secrets are in the realm file
+  # and are for local development only. The issuer URL http://localhost:8180/realms/trade-store is the default
+  # OAUTH2_ISSUER_URI in application.yml.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+    ports:
+      - "127.0.0.1:8180:8080"
+    volumes:
+      - ./compose/keycloak/trade-store-realm.json:/opt/keycloak/data/import/trade-store-realm.json:ro
 
 volumes:
   postgres-data:

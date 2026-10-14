@@ -1,25 +1,25 @@
 # Trade Store – Architecture
 
-This document describes the target architecture of the trade store. It is the reference for implementation and is updated as design decisions are made. Parts of the design that are not implemented yet are marked **(planned)**; §12 lists them.
+This document describes the architecture of the trade store. It is the reference for implementation and is updated as design decisions are made. §12 lists the implementation status of each area.
 
 ## 1. Overview
 
-Kafka is the primary entry point for trades. A REST endpoint (rate limiting and authentication planned) is a secondary entry point, used as a backup when Kafka is unavailable and for producers that integrate directly over HTTP. Both entry points are thin adapters over one **Trade Processing Service**, which owns all validation and is the only component that writes trade state.
+Kafka is the primary entry point for trades. A REST endpoint, secured with OAuth2 bearer tokens and rate limited per client, is a secondary entry point, used as a backup when Kafka is unavailable and for producers that integrate directly over HTTP. Both entry points are thin adapters over one **Trade Processing Service**, which owns all validation and is the only component that writes trade state.
 
-State changes and their events are written to PostgreSQL in the same transaction (**transactional outbox**). An **outbox relay** then delivers the events to MongoDB (history and projections) and to Kafka (status events). Read-only REST endpoints serve current state from PostgreSQL and history from MongoDB.
+State changes and their events are written to PostgreSQL in the same transaction (**transactional outbox**). An **outbox relay** then delivers the events to MongoDB (history and the `trade_views` projection) and to Kafka (status events). Read-only REST endpoints serve current state from PostgreSQL, and history and the by-book view from MongoDB.
 
 ```
                     ┌──────────────────────────── Spring Boot Trade Store App ────────────────────────────┐
 Producers ──► Kafka ──► Trade Consumer ──┐                                                               │
              (trades,                    ├──► Trade Processing Service ──► PostgreSQL ◄── Expiry Scheduler │
               key = trade id)            │    (validation rules,           (trades,         (ShedLock)     │
-Producers ──► Rate Limiter ──► POST ─────┘     version check,               processed_message,             │
-             (per client, 429)  /api/v1/trades  idempotency)                outbox_event)                  │
+Producers ──► JWT + Rate ──► POST ────────┘     version check,               processed_message,             │
+             Limiter (429)   /api/v1/trades  idempotency)                outbox_event)                  │
                                                                                  │                         │
                                                                            Outbox Relay ──► MongoDB         │
                                                                                  └────────► Kafka           │
                                                                                             (trade-status)  │
-Clients ──► GET /api/v1/trades ... ──► Trade Query API ──► PostgreSQL (current) / MongoDB (history)       │
+Clients ──► GET /api/v1/... (JWT) ──► Trade Query API ──► PostgreSQL (current) / MongoDB (history, views)│
                     └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -65,16 +65,20 @@ A thin adapter (`TradeConsumer`). It reads the record value as a string, parses 
 | New trade id stored | `201 Created` |
 | Higher version stored, or same version replaced | `200 OK` |
 | Malformed request | `400 Bad Request` |
-| Missing or invalid credentials **(planned)** | `401 Unauthorized` / `403 Forbidden` |
+| Missing or invalid token / token without `trades:write` | `401 Unauthorized` / `403 Forbidden` |
 | Lower version than stored | `409 Conflict` |
 | Maturity date earlier than today | `422 Unprocessable Entity` |
-| Rate limit exceeded **(planned)** | `429 Too Many Requests` with `Retry-After` |
+| Body without `Content-Length` | `411 Length Required` |
+| Body larger than `trade-store.rest.max-request-size` (16 KB) | `413 Content Too Large` |
+| Rate limit exceeded | `429 Too Many Requests` with `Retry-After` |
 | Database unavailable | `503 Service Unavailable` with `Retry-After` |
 
 Errors are returned as RFC 9457 problem details by `RestExceptionHandler`.
 
 - **Idempotency** – callers may send an `Idempotency-Key` header (at most 200 characters). It becomes the message id (`rest:<key>`); a repeated key returns the originally recorded outcome without reprocessing. Without the header, a random id is used, so a retried request is processed again.
-- **Rate limiter (planned)** – Bucket4j token buckets keyed by the authenticated client id, so one noisy producer cannot starve others. Requests over the limit fail fast with `429` instead of queueing. By default buckets are held in memory, so the limit applies **per instance** (configured as the desired global limit divided by the instance count). A Redis-backed Bucket4j store gives an exact global limit when needed, and an API gateway is an alternative in larger deployments.
+- **Rate limiter** – Bucket4j token buckets keyed by the authenticated client (the JWT subject), so one noisy producer cannot starve others (`ClientRateLimiter`). Each bucket allows `trade-store.rest.requests-per-second` requests per second (default 100, `REST_REQUESTS_PER_SECOND`) with a burst of the same size. Requests over the limit fail fast with `429` and a `Retry-After` header instead of queueing. Buckets are held in memory, so the limit applies **per instance** (configure the desired global limit divided by the instance count). A Redis-backed Bucket4j store gives an exact global limit when needed, and an API gateway is an alternative in larger deployments. Read endpoints are not rate limited.
+- **Request size limit** – the body must declare its `Content-Length` and stay within `trade-store.rest.max-request-size` (16 KB; a trade is about 150 bytes), so an oversized body is rejected before it is read or parsed.
+- Both checks run in `IngestionLimitInterceptor`, after authentication and before the body is read.
 
 ### 2.5 Trade Processing Service
 
@@ -101,7 +105,7 @@ The **authoritative trade state** and the write-side store for idempotency and t
 
 A scheduled poller (single active instance via ShedLock). Each poll reads the oldest pending events **separately for each destination** (each query is backed by its own partial index) and delivers them:
 
-- **to MongoDB** – upserts the event into `trade_events` using the outbox event id as `_id`, so redelivery is idempotent (updating query projections is planned);
+- **to MongoDB** – upserts the event into `trade_events` using the outbox event id as `_id`, so redelivery is idempotent, and applies it to the `trade_views` projection (§2.8);
 - **to Kafka** – publishes `EXPIRED` events to the `trade-status` topic, keyed by trade id.
 
 Each destination is read, delivered and marked independently (`mongo_delivered_at`, `kafka_delivered_at`, each set by its own `UPDATE`), so an outage or backlog of one destination never holds up the other. Within a poll, the first failed delivery to a destination stops further deliveries to it until the next poll. This bounds a poll to one timeout per destination, well inside the ShedLock lease, and keeps per-trade order on `trade-status`. Failed deliveries are retried on the next poll. Debezium (change data capture on the outbox table) is a drop-in alternative to the poller if lower latency is needed.
@@ -111,7 +115,7 @@ Each destination is read, delivered and marked independently (`mongo_delivered_a
 The **trade event history** and read side.
 
 - `trade_events` – one immutable document per event (created, updated, replaced, rejected with reason, expired), including the full trade payload and the event source.
-- **Projections (planned)** – read-optimised views (for example, trades by book or by counter-party), updated by the relay from events. They are eventually consistent with PostgreSQL, typically within one relay poll interval.
+- `trade_views` – a read-optimised projection holding the current state of each trade (`_id` = trade id), indexed by book. The relay applies every event to it (`TradeViewProjector`): `CREATED`, `UPDATED` and `REPLACED` upsert the trade only if the view holds the same or a lower version; `EXPIRED` marks the view expired only if it still holds the expired version; `REJECTED` changes nothing. Every update is conditional on the version, so redelivered or stale events never move a view backwards. It serves `GET /api/v1/books/{bookId}/trades` and is eventually consistent with PostgreSQL, typically within one relay poll interval. Further views (for example by counter-party) are added the same way.
 
 ### 2.9 Expiry Scheduler
 
@@ -129,18 +133,43 @@ Because the events are written in the same transaction as the update, a crash ca
 | `GET /api/v1/trades?bookId=&counterPartyId=&expired=&page=&size=` | PostgreSQL, paginated and filtered |
 | `GET /api/v1/trades/{tradeId}` | PostgreSQL, current version |
 | `GET /api/v1/trades/{tradeId}/history` | MongoDB, all events of the trade, paginated |
+| `GET /api/v1/books/{bookId}/trades?page=&size=` | MongoDB `trade_views` projection, paginated; eventually consistent |
+
+All read endpoints require a token with the `trades:read` scope.
 
 ### 2.11 Security
 
-- **REST (planned)** – OAuth2 resource server with JWT bearer tokens. `POST /api/v1/trades` requires the `trades:write` scope; read endpoints require `trades:read`. Request size limits are planned as well. Implemented today: request bodies are validated with Bean Validation (identifiers at most 64 characters, version ≥ 1, maturity date required).
-- **Kafka (planned)** – `SASL_SSL` authentication and topic ACLs: producers may only write to `trades`; the application may read `trades` and write `trade-status` and the dead-letter topic.
+- **REST** – OAuth2 resource server with JWT bearer tokens (`SecurityConfig`). Tokens are verified against the issuer's published keys (`spring.security.oauth2.resourceserver.jwt.issuer-uri`, set with `OAUTH2_ISSUER_URI`), and the issuer claim is checked. `POST /api/v1/trades` requires the `trades:write` scope; read endpoints require `trades:read`; Actuator `health` and `info` are public, other Actuator endpoints need any valid token. The API is stateless, so sessions and CSRF protection are disabled. Request bodies are size limited (§2.4) and validated with Bean Validation (identifiers at most 64 characters, version ≥ 1, maturity date required). For local runs, `compose.yml` starts Keycloak with a `trade-store` realm and two service-account clients (`trade-producer`, `trade-reader`).
+- **Kafka** – the `kafka-sasl` Spring profile (`application-kafka-sasl.yml`) switches the clients to `SASL_SSL` with SCRAM-SHA-512. Credentials and the trust store come from `KAFKA_USERNAME`, `KAFKA_PASSWORD`, `KAFKA_TRUSTSTORE_LOCATION` and `KAFKA_TRUSTSTORE_PASSWORD`; the protocol is fixed, so a missing secret makes the connection fail instead of falling back to an unauthenticated one. Topic ACLs are set on the cluster: producers may only write to `trades`; the application may read `trades` (consumer group `trade-store`) and write `trade-status` and `trades-dlt`:
+
+  ```shell
+  kafka-acls.sh --bootstrap-server <broker> --command-config admin.properties --add \
+    --allow-principal User:<producer> --operation Write --operation Describe --topic trades
+  kafka-acls.sh --bootstrap-server <broker> --command-config admin.properties --add \
+    --allow-principal User:trade-store --operation Read --operation Describe --topic trades --group trade-store
+  kafka-acls.sh --bootstrap-server <broker> --command-config admin.properties --add \
+    --allow-principal User:trade-store --operation Write --operation Describe --topic trade-status --topic trades-dlt
+  ```
+
+  Topics are created by the platform team when ACLs are enforced, because the application is not granted `Create`.
 - **Secrets** – credentials are supplied through environment variables (`POSTGRES_PASSWORD`, `MONGODB_URI`, …) and never committed to the repository.
 
 ### 2.12 Monitoring
 
-Implemented: Spring Boot Actuator `health`, `info` and `metrics` endpoints, including the connection pool metrics (`hikaricp.connections.*`, `mongodb.driver.pool.*`). Logs carry the trade id and message id of every stored, rejected or duplicate trade.
+Spring Boot Actuator exposes `health` and `info` (public) and `metrics` (any valid token, §2.11), including the connection pool metrics (`hikaricp.connections.*`, `mongodb.driver.pool.*`). Logs carry the trade id and message id of every stored, rejected or duplicate trade.
 
-Planned: application metrics for trades received per source, created / updated / replaced / rejected (by reason), expired, consumer lag, rate-limited requests and outbox backlog (undelivered events per destination), and structured (JSON) logs.
+Application metrics (`TradeMetrics`, `OutboxBacklogMetrics`):
+
+| Metric | Type | Meaning |
+|--------|------|---------|
+| `tradestore.trades.processed` | Counter, tags `source`, `outcome` | Processed messages: `CREATED`, `UPDATED`, `REPLACED`, `REJECTED_LOWER_VERSION`, `REJECTED_MATURITY_IN_PAST` or `DUPLICATE`. Counted after the transaction commits, so retried transactions are counted once. The sum per source is the number received. |
+| `tradestore.trades.expired` | Counter | Trades marked expired by the expiry scheduler |
+| `tradestore.rest.rate.limited` | Counter | REST ingestion requests rejected with `429` |
+| `tradestore.processed.messages.purged` | Counter | Idempotency records deleted by the purge job |
+| `tradestore.outbox.pending` | Gauge, tag `destination` (`mongodb`, `kafka`) | Outbox events not yet delivered; a growing value means a destination is down or the relay is behind |
+| `kafka.consumer.fetch.manager.records.lag.max` | Gauge | Consumer lag, published by the Kafka client through Spring Boot's Micrometer integration |
+
+Logs are structured JSON in Elastic Common Schema (`logging.structured.format.console: ecs`), so log shippers can index them without parsing.
 
 ## 3. Data Model
 
@@ -153,14 +182,14 @@ Planned: application metrics for trades received per source, created / updated /
 | `outbox_event` | Events awaiting delivery | `id` (PK, UUID), `trade_id`, `version`, `type`, `source`, `payload` (JSONB), `created_at`, `mongo_delivered_at`, `kafka_delivered_at` |
 | `shedlock` | Distributed locks for scheduled jobs | `name` (PK), `lock_until`, `locked_at`, `locked_by` |
 
-Indexes: `trades (expired, maturity_date)` for the expiry scheduler, `trades (book_id)` and `trades (counter_party_id)` for queries, and partial indexes on `outbox_event` for undelivered rows. A scheduled job that purges `processed_message` rows older than the Kafka retention period is planned; the `processed_at` index exists for it.
+Indexes: `trades (expired, maturity_date)` for the expiry scheduler, `trades (book_id)` and `trades (counter_party_id)` for queries, and partial indexes on `outbox_event` for undelivered rows. A daily job (`ProcessedMessagePurgeScheduler`, ShedLock `purge-processed-messages`, 00:30 UTC) deletes `processed_message` rows older than `trade-store.purge.processed-message-retention` (14 days, longer than Kafka's default retention of 7 days) in batches of 1,000, using the `processed_at` index. A message redelivered after its record was purged would be processed again, so the retention must always exceed the Kafka retention and the longest period a REST client retries with the same `Idempotency-Key`.
 
 ### MongoDB
 
 | Collection | Purpose |
 |------------|---------|
 | `trade_events` | Full event history, `_id` = outbox event id, indexed by `tradeId` and `occurredAt` |
-| projection collections **(planned)** | Read-optimised views, for example by book or by counter-party |
+| `trade_views` | Current state of each trade, `_id` = trade id, indexed by `bookId` (§2.8) |
 
 ### Schema migrations
 
@@ -173,7 +202,8 @@ src/main/resources/db/changelog/
 │   └── changes/001-create-trade-store-tables.sql   (formatted SQL with rollback statements)
 └── mongodb/
     ├── db.changelog-master.yaml
-    └── changes/001-create-trade-events.yaml        (collection and index change sets)
+    ├── changes/001-create-trade-events.yaml        (collection and index change sets)
+    └── changes/002-create-trade-views.yaml         (projection collection and book index)
 ```
 
 - **PostgreSQL** – applied by Spring Boot's Liquibase auto-configuration (`spring.liquibase.change-log`) before JPA starts, so Hibernate's schema validation runs against the migrated schema.
@@ -227,8 +257,8 @@ Together they represent the sample table: current state plus history. Trades suc
 
 ### REST (backup / direct)
 
-1. A producer calls `POST /api/v1/trades` with a JWT (planned) and, optionally, an `Idempotency-Key`.
-2. The rate limiter (planned) admits the request or rejects it with `429`.
+1. A producer calls `POST /api/v1/trades` with a JWT bearer token carrying the `trades:write` scope and, optionally, an `Idempotency-Key`. A missing or invalid token is rejected with `401`, a token without the scope with `403`.
+2. The rate limiter admits the request or rejects it with `429`; a body without a length or over the size limit is rejected with `411` or `413`.
 3. The request body is validated; a malformed request is rejected with `400`.
 4. The processing service runs the steps in §2.5.
 5. The outcome is returned as an HTTP status (see §2.4).
@@ -236,7 +266,7 @@ Together they represent the sample table: current state plus history. Trades suc
 ### Event delivery
 
 1. The outbox relay reads undelivered events.
-2. It upserts them into MongoDB and publishes `EXPIRED` events to `trade-status`.
+2. It upserts them into MongoDB (`trade_events` and `trade_views`) and publishes `EXPIRED` events to `trade-status`.
 3. It marks each destination as delivered.
 
 ### Expiry
@@ -285,12 +315,14 @@ Business rejections are excluded from retries (configured as not-retryable in Sp
 - **Why a transactional outbox** – writing PostgreSQL and then MongoDB or Kafka directly is a dual write: a crash in between loses the event. With the outbox, the state change and its event commit together, and delivery is retried until it succeeds. The same mechanism keeps expiry events flowing to MongoDB while Kafka is down.
 - **Why an idempotency table** – Kafka delivers at least once and REST callers retry. Recording each message id in the same transaction as its effect makes every message take effect exactly once, including its event.
 - **Why replay is not used to rebuild state** – the maturity rule depends on the processing date, so replaying old messages would reject trades that were accepted when they first arrived, and would record spurious rejections. History is rebuilt from MongoDB events; reprocessing from Kafka is reserved for messages that failed because of a defect.
-- **Why a rate limiter (planned)** – the REST path has no Kafka buffer in front of the database. The limiter caps the load each client can put on PostgreSQL and fails fast with `429`.
+- **Why a rate limiter** – the REST path has no Kafka buffer in front of the database. The limiter caps the load each client can put on PostgreSQL and fails fast with `429`.
 - **Why both SQL and NoSQL** – PostgreSQL gives strong consistency for the current trade state, the version rule, idempotency and the outbox. MongoDB holds the append-only history and read models, where schema flexibility matters more than relational constraints.
 
 ## 10. Known Limitations
 
-- With in-memory Bucket4j buckets (once implemented), the rate limit is per instance; an exact global limit needs the Redis-backed store.
+- With in-memory Bucket4j buckets, the rate limit is per instance; an exact global limit needs the Redis-backed store.
+- The `trade_views` projection and `GET /api/v1/books/{bookId}/trades` lag PostgreSQL by up to one relay poll interval; `GET /api/v1/trades?bookId=` reads PostgreSQL and is always current.
+- A message redelivered after its `processed_message` record was purged is processed again. The retention (14 days) is chosen to exceed the Kafka retention.
 - MongoDB history is eventually consistent with PostgreSQL, behind by up to one relay poll interval.
 - Between scheduler runs, a trade whose maturity date has just passed is still shown as not expired. Running the scheduler shortly after midnight keeps this window small.
 - When the same trade id and version arrive on both paths with different contents, which one is kept depends on commit order.
@@ -300,8 +332,9 @@ Business rejections are excluded from retries (configured as not-retryable in Sp
 
 | Layer | Tests | What they prove |
 |-------|-------|-----------------|
-| Unit (`*Test`, `mvn test`) | Validation rules, processing service, consumer, controllers, expiry, outbox relay, configuration | Business rules and error mapping, with external services mocked |
-| Integration (`*IT`, `mvn verify`, Testcontainers) | `TradeStoreFlowIT`, `TradeExpiryRepositoryIT`, `TradeQueryServiceIT`, `SchemaMigrationIT`, `DatabasePoolIT` | SQL, MongoDB queries, Kafka consumption and Liquibase migrations against real services |
+| Unit (`*Test`, `mvn test`) | Validation rules, processing service, consumer, controllers (with the real security rules and mock JWTs), rate limiter and size limits, expiry, purge, outbox relay, metrics, configuration | Business rules, error mapping, authorization and limits, with external services mocked |
+| Integration (`*IT`, `mvn verify`, Testcontainers) | `TradeStoreFlowIT`, `TradeExpiryRepositoryIT`, `TradeQueryServiceIT`, `TradeViewProjectorIT`, `ProcessedMessagePurgeIT`, `SchemaMigrationIT`, `DatabasePoolIT` | SQL, MongoDB queries and projections, Kafka consumption and Liquibase migrations against real services |
+| Sample data (`SampleDataScenarioIT`) | The assignment's sample table, end to end | Each row is reproduced by receiving the trade while its maturity date was still in the future (a movable test clock); the lower-version, same-version, past-maturity and expiry rules on the same data |
 | Consistency (`TradeStoreConsistencyIT`) | Real outages, simulated by pausing the containers | PostgreSQL and MongoDB stay consistent under partial failure and retries |
 
 Mocks can show that the code calls MongoDB after PostgreSQL, but not that the two stores agree after a failure. `TradeStoreConsistencyIT` covers that with real services:
@@ -334,8 +367,8 @@ Integration tests start their own containers with Testcontainers (`Testcontainer
 | Read-only query API (trades, trade, history) | Implemented |
 | Liquibase migrations for PostgreSQL and MongoDB, connection pools | Implemented |
 | Local infrastructure (`compose.yml`) | Implemented |
-| OAuth2/JWT security for REST, Kafka SASL_SSL and ACLs | Planned |
-| Bucket4j rate limiter and request size limits | Planned |
-| MongoDB projections | Planned |
-| Purge job for old `processed_message` rows | Planned |
-| Application metrics and structured logs | Planned |
+| OAuth2/JWT security for REST, Kafka SASL_SSL profile and ACLs | Implemented (ACLs are applied on the cluster, §2.11) |
+| Bucket4j rate limiter and request size limits | Implemented |
+| MongoDB `trade_views` projection and by-book endpoint | Implemented |
+| Purge job for old `processed_message` rows | Implemented |
+| Application metrics and structured (ECS JSON) logs | Implemented |

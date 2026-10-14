@@ -14,7 +14,8 @@ else lock acquired
   group MongoDB
     relay -> postgres : select events where mongo_delivered_at is null\norder by created_at limit batch
     loop for each event, until the first failure
-      relay -> mongo : upsert trade_events (_id = event id)\n(projections planned)
+      relay -> mongo : upsert trade_events (_id = event id)
+      relay -> mongo : apply to trade_views\n(conditional on version)
       relay -> postgres : update set mongo_delivered_at
     end
   end

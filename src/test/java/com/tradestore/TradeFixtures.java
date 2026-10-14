@@ -5,9 +5,11 @@ import com.tradestore.domain.IncomingTrade;
 import com.tradestore.domain.Trade;
 import com.tradestore.persistence.sql.TradeEntity;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import org.springframework.util.unit.DataSize;
 
 /**
  * Shared test data. All tests run against a fixed business date, {@link #TODAY}.
@@ -26,7 +28,9 @@ public final class TradeFixtures {
         return new TradeStoreProperties(
                 new TradeStoreProperties.Topics("trades", "trade-status"),
                 new TradeStoreProperties.Expiry("0 5 0 * * *", 500),
-                new TradeStoreProperties.Outbox(1000, 200));
+                new TradeStoreProperties.Outbox(1000, 200),
+                new TradeStoreProperties.Rest(100, DataSize.ofKilobytes(16)),
+                new TradeStoreProperties.Purge("0 30 0 * * *", Duration.ofDays(14), 1000));
     }
 
     public static IncomingTrade incoming(String tradeId, int version) {

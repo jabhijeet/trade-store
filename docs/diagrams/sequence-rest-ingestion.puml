@@ -2,16 +2,11 @@
 title Trade Store - REST Ingestion (backup / direct)
 
 actor "Trade Producer" as producer
-participant "Security\n(OAuth2 JWT, planned)" as security
-participant "Rate Limiter\n(per client, planned)" as rateLimiter
+participant "Security\n(OAuth2 JWT)" as security
+participant "Ingestion Limits\n(rate per client, size)" as rateLimiter
 participant "Trade Ingestion API" as api
 participant "Trade Processing Service" as processing
 database "PostgreSQL" as postgres
-
-note over security, rateLimiter
-  Planned. Until implemented, requests
-  reach the Trade Ingestion API directly.
-end note
 
 producer -> security : POST /api/v1/trades\n(Bearer token, optional Idempotency-Key)
 alt missing or invalid token / scope
@@ -20,7 +15,9 @@ else authenticated (trades:write)
   security -> rateLimiter : request
   alt client bucket empty
     rateLimiter --> producer : 429 Too Many Requests (Retry-After)
-  else token available
+  else no Content-Length / body over 16 KB
+    rateLimiter --> producer : 411 Length Required / 413 Content Too Large
+  else token available, size accepted
     rateLimiter -> api : request
     alt malformed body
       api --> producer : 400 Bad Request

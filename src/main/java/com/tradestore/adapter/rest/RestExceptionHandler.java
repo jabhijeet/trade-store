@@ -42,6 +42,17 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
         return problem;
     }
 
+    /** {@code 429 Too Many Requests}: the client should wait {@code Retry-After} seconds. */
+    @ExceptionHandler(RateLimitExceededException.class)
+    public ResponseEntity<ProblemDetail> handleRateLimitExceeded(RateLimitExceededException exception) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.TOO_MANY_REQUESTS,
+                "Too many requests. Retry after %d seconds.".formatted(exception.getRetryAfterSeconds()));
+        problem.setTitle("Rate limit exceeded");
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(exception.getRetryAfterSeconds()))
+                .body(problem);
+    }
+
     /** {@code 503 Service Unavailable}: the database is temporarily unavailable; the caller should retry. */
     @ExceptionHandler(TransientDataAccessException.class)
     public ResponseEntity<ProblemDetail> handleTransientDataAccess(TransientDataAccessException exception) {

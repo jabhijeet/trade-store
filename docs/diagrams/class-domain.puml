@@ -111,6 +111,10 @@ package "service" {
     findTrade(tradeId) : Optional<Trade>
     findTrades(filter, pageable) : Page<Trade>
     findHistory(tradeId, pageable) : Page<TradeHistoryEvent>
+    findTradesByBook(bookId, pageable) : Page<Trade>
+  }
+  class ProcessedMessagePurgeScheduler <<ShedLock>> {
+    purgeExpiredRecords() : int
   }
 }
 
@@ -126,8 +130,17 @@ package "adapter" {
     getTrade(tradeId : String) : TradeResponse
     getTradeHistory(tradeId : String, pageable) : PageResponse<TradeEventResponse>
   }
+  class BookQueryController <<REST, read only>> {
+    getBookTrades(bookId : String, pageable) : PageResponse<TradeResponse>
+  }
+  class IngestionLimitInterceptor <<HandlerInterceptor>> {
+    preHandle() : 429 / 411 / 413
+  }
+  class ClientRateLimiter <<Bucket4j>> {
+    tryAcquire(clientId : String) : Optional<Duration>
+  }
   class RestExceptionHandler <<ControllerAdvice>> {
-    maps exceptions to 400 / 404 / 409 / 422 / 503
+    maps exceptions to 400 / 404 / 409 / 422 / 429 / 503
   }
 }
 
@@ -137,6 +150,15 @@ package "persistence" {
   interface ProcessedMessageRepository <<PostgreSQL>>
   interface OutboxEventRepository <<PostgreSQL>>
   interface TradeEventMongoRepository <<MongoDB>>
+  interface TradeViewMongoRepository <<MongoDB>>
+  class TradeViewProjector <<MongoDB>> {
+    apply(type : TradeEventType, payload : String)
+  }
+}
+
+package "observability" {
+  class TradeMetrics <<Micrometer>>
+  class OutboxBacklogMetrics <<MeterBinder>>
 }
 
 class "java.time.Clock\n(UTC)" as Clock
@@ -172,8 +194,16 @@ TradeExpiryService --> TradeExpiryRepository
 TradeExpiryService --> OutboxWriter
 OutboxRelay --> OutboxEventRepository
 OutboxRelay --> TradeEventMongoRepository
+OutboxRelay --> TradeViewProjector
+ProcessedMessagePurgeScheduler --> ProcessedMessageRepository
+IngestionLimitInterceptor --> ClientRateLimiter
+IngestionLimitInterceptor ..> TradeIngestionController : guards
+TradeProcessingService --> TradeMetrics
+OutboxBacklogMetrics --> OutboxEventRepository
+BookQueryController --> TradeQueryService
 TradeQueryController --> TradeQueryService
 TradeQueryService --> TradeJpaRepository
 TradeQueryService --> TradeEventMongoRepository
+TradeQueryService --> TradeViewMongoRepository
 RestExceptionHandler ..> TradeRejectedException : handles
 @enduml

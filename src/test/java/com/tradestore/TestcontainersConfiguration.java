@@ -1,6 +1,5 @@
 package com.tradestore;
 
-import java.time.Clock;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Bean;
@@ -33,9 +32,10 @@ public class TestcontainersConfiguration {
         return new KafkaContainer("apache/kafka:4.1.0");
     }
 
+    /** Fixed at {@link TradeFixtures#TODAY} unless a test moves it. */
     @Bean
     @Primary
-    Clock fixedClock() {
-        return TradeFixtures.FIXED_CLOCK;
+    MutableClock testClock() {
+        return new MutableClock();
     }
 }

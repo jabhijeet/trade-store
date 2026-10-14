@@ -4,3 +4,6 @@ databaseChangeLog:
   - include:
       file: changes/001-create-trade-events.yaml
       relativeToChangelogFile: true
+  - include:
+      file: changes/002-create-trade-views.yaml
+      relativeToChangelogFile: true
