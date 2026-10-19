@@ -6,7 +6,7 @@ import static com.tradestore.TradeFixtures.stored;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.tradestore.domain.LowerVersionTradeException;
+import com.tradestore.exception.LowerVersionTradeException;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 

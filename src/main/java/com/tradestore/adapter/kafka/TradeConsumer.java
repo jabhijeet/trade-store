@@ -1,10 +1,12 @@
 package com.tradestore.adapter.kafka;
 
-import com.tradestore.domain.EventSource;
+import com.tradestore.enums.EventSource;
 import com.tradestore.domain.IncomingTrade;
 import com.tradestore.domain.TradeCommand;
-import com.tradestore.domain.TradeRejectedException;
-import com.tradestore.service.TradeProcessingService;
+import com.tradestore.exception.InvalidTradeMessageException;
+import com.tradestore.exception.TradeRejectedException;
+import com.tradestore.model.TradeMessage;
+import com.tradestore.service.ingestion.TradeProcessingService;
 import java.util.ArrayList;
 import java.util.List;
 import lombok.RequiredArgsConstructor;

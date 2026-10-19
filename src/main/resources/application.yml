@@ -83,6 +83,14 @@ trade-store:
     processed-message-retention: 14d
     batch-size: 1000
 
+# OpenAPI document (/v3/api-docs) and Swagger UI (/swagger-ui.html). Both are public, so turn them off where the
+# API description should not be exposed.
+springdoc:
+  api-docs:
+    enabled: ${API_DOCS_ENABLED:true}
+  swagger-ui:
+    enabled: ${API_DOCS_ENABLED:true}
+
 management:
   endpoints:
     web:

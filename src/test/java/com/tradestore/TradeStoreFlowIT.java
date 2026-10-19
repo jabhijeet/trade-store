@@ -4,11 +4,11 @@ import static com.tradestore.TradeFixtures.TODAY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
-import com.tradestore.domain.TradeEventType;
-import com.tradestore.persistence.mongo.TradeEventDocument;
-import com.tradestore.persistence.mongo.TradeEventMongoRepository;
-import com.tradestore.persistence.sql.TradeEntity;
-import com.tradestore.persistence.sql.TradeJpaRepository;
+import com.tradestore.enums.TradeEventType;
+import com.tradestore.persistence.mongo.document.TradeEventDocument;
+import com.tradestore.persistence.mongo.repository.TradeEventMongoRepository;
+import com.tradestore.persistence.sql.entity.TradeEntity;
+import com.tradestore.persistence.sql.repository.TradeJpaRepository;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.util.List;

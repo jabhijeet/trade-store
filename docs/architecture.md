@@ -137,9 +137,11 @@ Because the events are written in the same transaction as the update, a crash ca
 
 All read endpoints require a token with the `trades:read` scope.
 
+The REST API is described by an OpenAPI 3 document at `/v3/api-docs` and can be browsed and called from Swagger UI at `/swagger-ui.html` (springdoc-openapi, `OpenApiConfig`). The document declares one HTTP bearer (JWT) security scheme and applies it to every operation, so Swagger UI sends the token entered under **Authorize** with each request.
+
 ### 2.11 Security
 
-- **REST** – OAuth2 resource server with JWT bearer tokens (`SecurityConfig`). Tokens are verified against the issuer's published keys (`spring.security.oauth2.resourceserver.jwt.issuer-uri`, set with `OAUTH2_ISSUER_URI`), and the issuer claim is checked. `POST /api/v1/trades` requires the `trades:write` scope; read endpoints require `trades:read`; Actuator `health` and `info` are public, other Actuator endpoints need any valid token. The API is stateless, so sessions and CSRF protection are disabled. Request bodies are size limited (§2.4) and validated with Bean Validation (identifiers at most 64 characters, version ≥ 1, maturity date required). For local runs, `compose.yml` starts Keycloak with a `trade-store` realm and two service-account clients (`trade-producer`, `trade-reader`).
+- **REST** – OAuth2 resource server with JWT bearer tokens (`SecurityConfig`). Tokens are verified against the issuer's published keys (`spring.security.oauth2.resourceserver.jwt.issuer-uri`, set with `OAUTH2_ISSUER_URI`), and the issuer claim is checked. `POST /api/v1/trades` requires the `trades:write` scope; read endpoints require `trades:read`; Actuator `health` and `info` are public, other Actuator endpoints need any valid token. The OpenAPI document and Swagger UI (§2.10) are public, because they only describe the API; calls made from Swagger UI carry the caller's own token. `API_DOCS_ENABLED=false` turns both off. The API is stateless, so sessions and CSRF protection are disabled. Request bodies are size limited (§2.4) and validated with Bean Validation (identifiers at most 64 characters, version ≥ 1, maturity date required). For local runs, `compose.yml` starts Keycloak with a `trade-store` realm and two service-account clients (`trade-producer`, `trade-reader`).
 - **Kafka** – the `kafka-sasl` Spring profile (`application-kafka-sasl.yml`) switches the clients to `SASL_SSL` with SCRAM-SHA-512. Credentials and the trust store come from `KAFKA_USERNAME`, `KAFKA_PASSWORD`, `KAFKA_TRUSTSTORE_LOCATION` and `KAFKA_TRUSTSTORE_PASSWORD`; the protocol is fixed, so a missing secret makes the connection fail instead of falling back to an unauthenticated one. Topic ACLs are set on the cluster: producers may only write to `trades`; the application may read `trades` (consumer group `trade-store`) and write `trade-status` and `trades-dlt`:
 
   ```shell
@@ -333,7 +335,7 @@ Business rejections are excluded from retries (configured as not-retryable in Sp
 | Layer | Tests | What they prove |
 |-------|-------|-----------------|
 | Unit (`*Test`, `mvn test`) | Validation rules, processing service, consumer, controllers (with the real security rules and mock JWTs), rate limiter and size limits, expiry, purge, outbox relay, metrics, configuration | Business rules, error mapping, authorization and limits, with external services mocked |
-| Integration (`*IT`, `mvn verify`, Testcontainers) | `TradeStoreFlowIT`, `TradeExpiryRepositoryIT`, `TradeQueryServiceIT`, `TradeViewProjectorIT`, `ProcessedMessagePurgeIT`, `SchemaMigrationIT`, `DatabasePoolIT` | SQL, MongoDB queries and projections, Kafka consumption and Liquibase migrations against real services |
+| Integration (`*IT`, `mvn verify`, Testcontainers) | `TradeStoreFlowIT`, `TradeExpiryRepositoryIT`, `TradeQueryServiceIT`, `TradeViewProjectorIT`, `ProcessedMessagePurgeIT`, `SchemaMigrationIT`, `DatabasePoolIT`, `OpenApiDocsIT` | SQL, MongoDB queries and projections, Kafka consumption, Liquibase migrations and the published OpenAPI document against real services |
 | Sample data (`SampleDataScenarioIT`) | The assignment's sample table, end to end | Each row is reproduced by receiving the trade while its maturity date was still in the future (a movable test clock); the lower-version, same-version, past-maturity and expiry rules on the same data |
 | Consistency (`TradeStoreConsistencyIT`) | Real outages, simulated by pausing the containers | PostgreSQL and MongoDB stay consistent under partial failure and retries |
 
@@ -372,3 +374,4 @@ Integration tests start their own containers with Testcontainers (`Testcontainer
 | MongoDB `trade_views` projection and by-book endpoint | Implemented |
 | Purge job for old `processed_message` rows | Implemented |
 | Application metrics and structured (ECS JSON) logs | Implemented |
+| OpenAPI document and Swagger UI | Implemented |

@@ -5,13 +5,16 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
 
 /**
  * REST endpoints are an OAuth2 resource server: every request carries a JWT bearer token, and the token's scopes
  * decide what the caller may do. {@code POST /api/v1/trades} needs {@code trades:write}; read endpoints need
- * {@code trades:read}. Actuator health and info are public so that load balancers can probe them.
+ * {@code trades:read}. Actuator health and info are public so that load balancers can probe them. The OpenAPI
+ * document and Swagger UI are public too: they describe the API but call it with the caller's own token, and can be
+ * switched off with {@code API_DOCS_ENABLED=false}.
  * <p>
  * The API is stateless and uses no cookies, so sessions and CSRF protection are disabled.
  */
@@ -26,12 +29,13 @@ public class SecurityConfig {
         return http
                 .authorizeHttpRequests(requests -> requests
                         .requestMatchers("/actuator/health/**", "/actuator/info").permitAll()
+                        .requestMatchers("/v3/api-docs/**", "/swagger-ui.html", "/swagger-ui/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/trades").hasAuthority(WRITE_SCOPE)
                         .requestMatchers(HttpMethod.GET, "/api/v1/**").hasAuthority(READ_SCOPE)
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(resourceServer -> resourceServer.jwt(Customizer.withDefaults()))
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                .csrf(csrf -> csrf.disable())
+                .csrf(AbstractHttpConfigurer::disable)
                 .build();
     }
 }

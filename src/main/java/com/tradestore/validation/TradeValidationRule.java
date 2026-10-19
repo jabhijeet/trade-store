@@ -2,7 +2,7 @@ package com.tradestore.validation;
 
 import com.tradestore.domain.IncomingTrade;
 import com.tradestore.domain.Trade;
-import com.tradestore.domain.TradeRejectedException;
+import com.tradestore.exception.TradeRejectedException;
 import java.time.LocalDate;
 import java.util.Optional;
 

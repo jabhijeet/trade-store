@@ -1,6 +1,6 @@
 package com.tradestore.observability;
 
-import com.tradestore.persistence.sql.OutboxEventRepository;
+import com.tradestore.persistence.sql.repository.OutboxEventRepository;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.MeterBinder;

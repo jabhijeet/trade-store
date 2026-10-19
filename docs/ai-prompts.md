@@ -7,7 +7,7 @@ every prompt given to an AI tool is shared in a separate document; this is that 
 
 **Approach:** Test-driven development (Red, Green, Refactor).
 
-**Tool used:** Claude Code (Anthropic), working in this repository. The AI wrote code, tests, diagrams and documentation in response to the prompts below. Every change was reviewed before it was committed; `e27bace` and `e74ba75` were committed and pushed by the AI on request.
+**Tool used:** Claude Code (Anthropic), working in this repository. The AI wrote code, tests, diagrams and documentation in response to the prompts below. Every change was reviewed before it was committed; `e27bace`, `e74ba75` and `388741a` were committed and pushed by the AI on request.
 
 ## Project system prompt
 
@@ -593,4 +593,70 @@ diagram says "422 Unprocessable Entity" while the code returns UNPROCESSABLE_CON
 Expected outcome:
 A requirement-by-requirement conformance view, every gap closed with evidence (a passing test run), documentation
 that matches the implementation exactly, and an explicit list of accepted residual risks.
+```
+
+### 19 October 2026
+
+#### `388741a` refactor: reorganize packages by responsibility
+
+Prompt 1: package review
+
+```text
+Context:
+The code works, but several packages have grown into mixed bags: service holds processing, queries, expiry, the
+outbox and a Kafka message record; the REST adapter mixes controllers, DTOs, rate limiting and configuration.
+
+Ask:
+Create a branch feature/refactorAndOrganize. Map the current package structure and the dependencies between
+packages, and propose which classes should move where. Do not move anything until I confirm; I will add classes
+and patterns of my own to the list.
+
+Expected outcome:
+A move plan grounded in the actual dependencies, with the risks (package-private access, documentation references)
+called out before any file changes.
+```
+
+Prompt 2: execute the moves
+
+```text
+Context:
+The plan is approved. I extended it step by step as the structure took shape.
+
+Ask:
+Apply the moves, keeping every test in the package of the class it tests:
+- Split service into ingestion, query, expiry, outbox and housekeeping.
+- Move all exceptions and the exception handler to com.tradestore.exception.
+- Move repositories to persistence.sql.repository and persistence.mongo.repository, and entities and documents to
+  persistence.sql.entity and persistence.mongo.document.
+- Move the REST controllers to adapter.rest.controller, and the DTOs and Kafka message records to a common
+  com.tradestore.model package.
+- Move the database and MongoDB configuration to config.database, and the enums to com.tradestore.enums.
+Then check that every test package is correct. Behaviour must not change.
+
+Example:
+TradeStatusMessage is used only by the outbox relay, so it must not end up in an adapter package that the service
+layer would then depend on.
+
+Expected outcome:
+A package structure organised by responsibility, with the full unit and integration suite green after the moves and
+git recording them as renames.
+```
+
+#### API documentation with Swagger UI
+
+```text
+Context:
+The REST API is secured with OAuth2 JWT bearer tokens. Reviewers currently explore it with PowerShell commands from
+the README.
+
+Ask:
+Add Swagger to the project so all available APIs can be seen and tested from the browser. Use a current release that
+supports Spring Boot 4.1. The token flow must work from Swagger UI, the API endpoints must stay protected, and the
+documentation must be possible to switch off where it should not be exposed. Prove it with a test. Then update the
+README, docs/architecture.md, the diagrams and this document for Swagger and the package reorganisation. Correct the
+local token instructions so the token request can be executed and its output copied straight into Swagger UI.
+
+Expected outcome:
+Swagger UI listing every endpoint and calling it with a pasted token, an integration test showing the document is
+public while the endpoints still require a token, and documentation that matches the new structure.
 ```

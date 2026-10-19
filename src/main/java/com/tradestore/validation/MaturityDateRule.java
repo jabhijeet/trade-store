@@ -1,7 +1,7 @@
 package com.tradestore.validation;
 
 import com.tradestore.domain.IncomingTrade;
-import com.tradestore.domain.MaturityDateInPastException;
+import com.tradestore.exception.MaturityDateInPastException;
 import com.tradestore.domain.Trade;
 import java.time.LocalDate;
 import java.util.Optional;

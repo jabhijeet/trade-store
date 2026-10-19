@@ -5,7 +5,7 @@ import static com.tradestore.TradeFixtures.incoming;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.tradestore.domain.MaturityDateInPastException;
+import com.tradestore.exception.MaturityDateInPastException;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 

@@ -1,7 +1,7 @@
 package com.tradestore.validation;
 
 import com.tradestore.domain.IncomingTrade;
-import com.tradestore.domain.LowerVersionTradeException;
+import com.tradestore.exception.LowerVersionTradeException;
 import com.tradestore.domain.Trade;
 import java.time.LocalDate;
 import java.util.Optional;

@@ -1,6 +1,6 @@
 package com.tradestore.observability;
 
-import com.tradestore.domain.EventSource;
+import com.tradestore.enums.EventSource;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;

@@ -43,6 +43,31 @@ PostgreSQL holds the authoritative trade state. State changes and their events a
 
 See [docs/architecture.md](docs/architecture.md) for details and PlantUML diagrams.
 
+## Project Structure
+
+Code is grouped by responsibility under `com.tradestore` (`src/main/java`); each test sits in the package of the class it tests.
+
+| Package | Contents |
+|---------|----------|
+| `adapter.kafka` | Kafka consumer of the `trades` topic |
+| `adapter.rest.controller` | REST controllers: ingestion, trade queries, book queries |
+| `adapter.rest.ratelimit` | Per-client rate limiter and the ingestion limit interceptor |
+| `service.ingestion` | Trade processing service (the single writer of trade state) and rejection recording |
+| `service.query` | Read side over PostgreSQL and MongoDB |
+| `service.expiry` | Expiry service and its scheduler |
+| `service.outbox` | Outbox writer, outbox relay and the MongoDB `trade_views` projector |
+| `service.housekeeping` | Purge of old idempotency records |
+| `validation` | Pluggable validation rules (version, maturity date) |
+| `domain` | Core records: `Trade`, `IncomingTrade`, `TradeCommand`, `TradeFilter`, `TradeHistoryEvent` |
+| `enums` | `EventSource`, `MessageOutcome`, `SaveOutcome`, `TradeEventType` |
+| `model` | REST request and response DTOs, Kafka message records (`TradeMessage`, `TradeStatusMessage`) |
+| `exception` | Business and adapter exceptions, and the REST problem-detail handler |
+| `persistence.sql.entity`, `persistence.sql.repository` | JPA entities and repositories (PostgreSQL) |
+| `persistence.mongo.document`, `persistence.mongo.repository` | MongoDB documents and repositories |
+| `config` | Security, Kafka, web, OpenAPI, clock, scheduling and application properties |
+| `config.database` | PostgreSQL pool and MongoDB pool and Liquibase configuration |
+| `observability` | Application metrics |
+
 ## Technical Requirements
 
 - [x] Java application built with **Spring Boot**
@@ -59,7 +84,7 @@ See [docs/architecture.md](docs/architecture.md) for details and PlantUML diagra
 
 Prerequisites: JDK 21, Maven 3.9+, and Docker (for integration tests).
 
-Tech stack: Spring Boot 4.1, Spring Security (OAuth2 resource server), Kafka, PostgreSQL, MongoDB, Liquibase (schema migrations for both databases), ShedLock, Bucket4j, Micrometer, JUnit 5, Mockito, Testcontainers.
+Tech stack: Spring Boot 4.1, Spring Security (OAuth2 resource server), Kafka, PostgreSQL, MongoDB, Liquibase (schema migrations for both databases), ShedLock, Bucket4j, Micrometer, springdoc-openapi (OpenAPI document and Swagger UI), JUnit 5, Mockito, Testcontainers.
 
 Run unit tests (`*Test`, no external services needed):
 
@@ -100,7 +125,7 @@ $env:POSTGRES_PASSWORD = "tradestore"
 mvn -f pom.xml spring-boot:run
 ```
 
-The API listens on `http://localhost:8080`. Liquibase creates the PostgreSQL tables and MongoDB collections on startup, and the Kafka topics (`trades`, `trades-dlt`, `trade-status`) are created automatically. Logs are structured JSON (Elastic Common Schema).
+The API listens on `http://localhost:8080`, and Swagger UI on `http://localhost:8080/swagger-ui.html` ([Swagger UI](#swagger-ui)). Liquibase creates the PostgreSQL tables and MongoDB collections on startup, and the Kafka topics (`trades`, `trades-dlt`, `trade-status`) are created automatically. Logs are structured JSON (Elastic Common Schema).
 
 | Setting | Environment variable | Default |
 |---------|----------------------|---------|
@@ -108,6 +133,7 @@ The API listens on `http://localhost:8080`. Liquibase creates the PostgreSQL tab
 | REST requests per second, per client and instance | `REST_REQUESTS_PER_SECOND` | `100` |
 | Expiry scheduler (cron, UTC) | `TRADE_STORE_EXPIRY_CRON` | `0 5 0 * * *` (00:05 daily) |
 | PostgreSQL / MongoDB / Kafka | `POSTGRES_URL`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `MONGODB_URI`, `KAFKA_BOOTSTRAP_SERVERS` | the compose services |
+| OpenAPI document and Swagger UI (public) | `API_DOCS_ENABLED` | `true` |
 | Kafka over SASL_SSL | `SPRING_PROFILES_ACTIVE=kafka-sasl` with `KAFKA_USERNAME`, `KAFKA_PASSWORD`, `KAFKA_TRUSTSTORE_LOCATION`, `KAFKA_TRUSTSTORE_PASSWORD` | off (PLAINTEXT) |
 
 ### 3. Stop
@@ -133,7 +159,28 @@ The realm has two service-account clients (OAuth2 client-credentials grant). The
 | `trade-producer` | `trade-producer-local-secret` | `trades:write trades:read` | submit and read trades |
 | `trade-reader` | `trade-reader-local-secret` | `trades:read` | read trades only |
 
-Get a token for each client (tokens are valid for 5 minutes; request a new one when calls start returning `401`):
+A token is requested from Keycloak's token endpoint with the client id and secret. Tokens are valid for 5 minutes (`expires_in: 300`); request a new one when calls start returning `401`.
+
+To see the response, call the token endpoint directly:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://localhost:8180/realms/trade-store/protocol/openid-connect/token" -Body @{ grant_type = "client_credentials"; client_id = "trade-producer"; client_secret = "trade-producer-local-secret" } | Select-Object token_type, expires_in, scope, access_token | Format-List
+```
+
+```text
+token_type   : Bearer
+expires_in   : 300
+scope        : trades:write trades:read
+access_token : eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJ...
+```
+
+The same request with `curl`, which works in any shell (on Windows, `curl.exe`):
+
+```shell
+curl -s -X POST "http://localhost:8180/realms/trade-store/protocol/openid-connect/token" -d "grant_type=client_credentials" -d "client_id=trade-producer" -d "client_secret=trade-producer-local-secret"
+```
+
+The commands in this guide keep a token for each client in a variable:
 
 ```powershell
 $producer = (Invoke-RestMethod -Method Post -Uri "http://localhost:8180/realms/trade-store/protocol/openid-connect/token" -Body @{ grant_type = "client_credentials"; client_id = "trade-producer"; client_secret = "trade-producer-local-secret" }).access_token
@@ -141,6 +188,16 @@ $producer = (Invoke-RestMethod -Method Post -Uri "http://localhost:8180/realms/t
 
 ```powershell
 $reader = (Invoke-RestMethod -Method Post -Uri "http://localhost:8180/realms/trade-store/protocol/openid-connect/token" -Body @{ grant_type = "client_credentials"; client_id = "trade-reader"; client_secret = "trade-reader-local-secret" }).access_token
+```
+
+Print a token to copy it (for example into Swagger UI), or check that it works by calling the API with it (`200`):
+
+```powershell
+$producer
+```
+
+```powershell
+(Invoke-WebRequest -Uri "http://localhost:8080/api/v1/trades?size=1" -Headers @{ Authorization = "Bearer $producer" }).StatusCode
 ```
 
 To see what the application checks, decode the token's claims (`iss` must equal the issuer, `scope` holds the scopes, `sub` identifies the client for rate limiting):
@@ -158,6 +215,31 @@ Security scenarios:
 | Write with `trade-reader` (no `trades:write`) | `Invoke-WebRequest -Method Post -Uri "http://localhost:8080/api/v1/trades" -Headers @{ Authorization = "Bearer $reader" } -ContentType "application/json" -Body '{"tradeId":"T1","version":1,"counterPartyId":"CP-1","bookId":"B1","maturityDate":"2030-05-20"}' -SkipHttpErrorCheck` | `403` |
 | Tampered or expired token | `Invoke-WebRequest -Uri "http://localhost:8080/api/v1/trades" -Headers @{ Authorization = "Bearer $($reader)x" } -SkipHttpErrorCheck` | `401` |
 | Actuator health (public) | `Invoke-RestMethod -Uri "http://localhost:8080/actuator/health"` | `200`, `UP` |
+| OpenAPI document (public) | `Invoke-RestMethod -Uri "http://localhost:8080/v3/api-docs"` | `200`, the API description |
+
+### Swagger UI
+
+Swagger UI lists every REST endpoint with its parameters, request body and responses, and can call them. The OpenAPI document it is built from is at `http://localhost:8080/v3/api-docs`. Both are public; the endpoints still need a token.
+
+1. Open `http://localhost:8080/swagger-ui.html`.
+2. Get a token and copy it to the clipboard. `trade-producer` can call every endpoint, `trade-reader` only the `GET` endpoints:
+
+   ```powershell
+   (Invoke-RestMethod -Method Post -Uri "http://localhost:8180/realms/trade-store/protocol/openid-connect/token" -Body @{ grant_type = "client_credentials"; client_id = "trade-producer"; client_secret = "trade-producer-local-secret" }).access_token | Set-Clipboard
+   ```
+
+   To see the token instead, leave out `| Set-Clipboard` and copy the printed value (one long line starting with `eyJ`). [OAuth2 tokens](#oauth2-tokens) shows the full response and a `curl` version.
+
+3. Select **Authorize**, paste the token into **Value** without the `Bearer ` prefix (Swagger UI adds it), select **Authorize** again, then **Close**.
+4. Open an endpoint, select **Try it out**, fill in the parameters or body, and select **Execute**. Swagger UI shows the `curl` command, the status code and the response.
+
+For example, `POST /api/v1/trades` with this body returns `201` and `CREATED` for a new trade id, then `200` and `REPLACED` when sent again with a new (or no) `Idempotency-Key`; the [REST section](#rest-ingestion-and-validation-rules) lists the other outcomes:
+
+```json
+{"tradeId":"T1","version":1,"counterPartyId":"CP-1","bookId":"B1","maturityDate":"2030-05-20"}
+```
+
+Tokens expire after 5 minutes. When calls start returning `401`, run step 2 again, select **Authorize**, **Logout**, and paste the new token. Set `API_DOCS_ENABLED=false` to turn off the OpenAPI document and Swagger UI where the API description should not be exposed.
 
 ### REST ingestion and validation rules
 
