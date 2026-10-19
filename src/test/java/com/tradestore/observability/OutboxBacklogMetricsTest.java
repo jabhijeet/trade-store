@@ -3,7 +3,7 @@ package com.tradestore.observability;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.when;
 
-import com.tradestore.persistence.sql.OutboxEventRepository;
+import com.tradestore.persistence.sql.repository.OutboxEventRepository;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

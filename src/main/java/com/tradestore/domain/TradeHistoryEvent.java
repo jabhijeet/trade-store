@@ -1,5 +1,7 @@
 package com.tradestore.domain;
 
+import com.tradestore.enums.EventSource;
+import com.tradestore.enums.TradeEventType;
 import java.time.Instant;
 import java.util.Map;
 

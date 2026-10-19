@@ -3,7 +3,7 @@ package com.tradestore;
 import com.tradestore.config.TradeStoreProperties;
 import com.tradestore.domain.IncomingTrade;
 import com.tradestore.domain.Trade;
-import com.tradestore.persistence.sql.TradeEntity;
+import com.tradestore.persistence.sql.entity.TradeEntity;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;

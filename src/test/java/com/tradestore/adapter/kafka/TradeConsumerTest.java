@@ -8,12 +8,13 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.tradestore.domain.EventSource;
+import com.tradestore.enums.EventSource;
 import com.tradestore.domain.IncomingTrade;
-import com.tradestore.domain.LowerVersionTradeException;
-import com.tradestore.domain.SaveOutcome;
+import com.tradestore.enums.SaveOutcome;
 import com.tradestore.domain.TradeCommand;
-import com.tradestore.service.TradeProcessingService;
+import com.tradestore.exception.InvalidTradeMessageException;
+import com.tradestore.exception.LowerVersionTradeException;
+import com.tradestore.service.ingestion.TradeProcessingService;
 import java.time.LocalDate;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.BeforeEach;

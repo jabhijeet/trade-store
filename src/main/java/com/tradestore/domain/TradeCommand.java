@@ -1,5 +1,7 @@
 package com.tradestore.domain;
 
+import com.tradestore.enums.EventSource;
+
 /**
  * A request to process one incoming trade.
  *
