@@ -42,7 +42,9 @@ package "domain" {
     counterPartyId : String
     expired : Boolean
   }
+}
 
+package "enums" {
   enum TradeEventType {
     CREATED
     UPDATED
@@ -70,7 +72,9 @@ package "domain" {
     REJECTED_LOWER_VERSION
     REJECTED_MATURITY_IN_PAST
   }
+}
 
+package "exception" {
   abstract class TradeRejectedException {
     tradeId : String
     version : int
@@ -78,6 +82,9 @@ package "domain" {
   }
   class LowerVersionTradeException
   class MaturityDateInPastException
+  class RestExceptionHandler <<ControllerAdvice>> {
+    maps exceptions to 400 / 404 / 409 / 422 / 429 / 503
+  }
 }
 
 package "validation" {
@@ -89,70 +96,87 @@ package "validation" {
 }
 
 package "service" {
-  class TradeProcessingService {
-    process(command : TradeCommand) : SaveOutcome
+  package "ingestion" {
+    class TradeProcessingService {
+      process(command : TradeCommand) : SaveOutcome
+    }
+    class RejectionRecorder {
+      record(command, rejection)
+    }
   }
-  class RejectionRecorder {
-    record(command, rejection)
+  package "expiry" {
+    class ExpiryScheduler <<ShedLock>> {
+      run()
+    }
+    class TradeExpiryService {
+      expireNextBatch(today : LocalDate) : int
+    }
   }
-  class OutboxWriter {
-    append(tradeId, version, type, source, reason, payload)
+  package "outbox" {
+    class OutboxWriter {
+      append(tradeId, version, type, source, reason, payload)
+    }
+    class OutboxRelay <<ShedLock>> {
+      deliverPendingEvents() : int
+    }
+    class TradeViewProjector <<MongoDB>> {
+      apply(type : TradeEventType, payload : String)
+    }
   }
-  class ExpiryScheduler <<ShedLock>> {
-    run()
+  package "query" {
+    class TradeQueryService {
+      findTrade(tradeId) : Optional<Trade>
+      findTrades(filter, pageable) : Page<Trade>
+      findHistory(tradeId, pageable) : Page<TradeHistoryEvent>
+      findTradesByBook(bookId, pageable) : Page<Trade>
+    }
   }
-  class TradeExpiryService {
-    expireNextBatch(today : LocalDate) : int
-  }
-  class OutboxRelay <<ShedLock>> {
-    deliverPendingEvents() : int
-  }
-  class TradeQueryService {
-    findTrade(tradeId) : Optional<Trade>
-    findTrades(filter, pageable) : Page<Trade>
-    findHistory(tradeId, pageable) : Page<TradeHistoryEvent>
-    findTradesByBook(bookId, pageable) : Page<Trade>
-  }
-  class ProcessedMessagePurgeScheduler <<ShedLock>> {
-    purgeExpiredRecords() : int
+  package "housekeeping" {
+    class ProcessedMessagePurgeScheduler <<ShedLock>> {
+      purgeExpiredRecords() : int
+    }
   }
 }
 
 package "adapter" {
-  class TradeConsumer <<Kafka>> {
-    onTrade(record : ConsumerRecord)
+  package "kafka" {
+    class TradeConsumer <<Kafka>> {
+      onTrade(record : ConsumerRecord)
+    }
   }
-  class TradeIngestionController <<REST>> {
-    ingestTrade(request : TradeRequest, idempotencyKey : String) : ResponseEntity<IngestionResponse>
+  package "rest.controller" {
+    class TradeIngestionController <<REST>> {
+      ingestTrade(request : TradeRequest, idempotencyKey : String) : ResponseEntity<IngestionResponse>
+    }
+    class TradeQueryController <<REST, read only>> {
+      getTrades(bookId, counterPartyId, expired, pageable) : PageResponse<TradeResponse>
+      getTrade(tradeId : String) : TradeResponse
+      getTradeHistory(tradeId : String, pageable) : PageResponse<TradeEventResponse>
+    }
+    class BookQueryController <<REST, read only>> {
+      getBookTrades(bookId : String, pageable) : PageResponse<TradeResponse>
+    }
   }
-  class TradeQueryController <<REST, read only>> {
-    getTrades(bookId, counterPartyId, expired, pageable) : PageResponse<TradeResponse>
-    getTrade(tradeId : String) : TradeResponse
-    getTradeHistory(tradeId : String, pageable) : PageResponse<TradeEventResponse>
-  }
-  class BookQueryController <<REST, read only>> {
-    getBookTrades(bookId : String, pageable) : PageResponse<TradeResponse>
-  }
-  class IngestionLimitInterceptor <<HandlerInterceptor>> {
-    preHandle() : 429 / 411 / 413
-  }
-  class ClientRateLimiter <<Bucket4j>> {
-    tryAcquire(clientId : String) : Optional<Duration>
-  }
-  class RestExceptionHandler <<ControllerAdvice>> {
-    maps exceptions to 400 / 404 / 409 / 422 / 429 / 503
+  package "rest.ratelimit" {
+    class IngestionLimitInterceptor <<HandlerInterceptor>> {
+      preHandle() : 429 / 411 / 413
+    }
+    class ClientRateLimiter <<Bucket4j>> {
+      tryAcquire(clientId : String) : Optional<Duration>
+    }
   }
 }
 
 package "persistence" {
-  interface TradeJpaRepository <<PostgreSQL>>
-  class TradeExpiryRepository <<PostgreSQL>>
-  interface ProcessedMessageRepository <<PostgreSQL>>
-  interface OutboxEventRepository <<PostgreSQL>>
-  interface TradeEventMongoRepository <<MongoDB>>
-  interface TradeViewMongoRepository <<MongoDB>>
-  class TradeViewProjector <<MongoDB>> {
-    apply(type : TradeEventType, payload : String)
+  package "sql.repository" {
+    interface TradeJpaRepository <<PostgreSQL>>
+    class TradeExpiryRepository <<PostgreSQL>>
+    interface ProcessedMessageRepository <<PostgreSQL>>
+    interface OutboxEventRepository <<PostgreSQL>>
+  }
+  package "mongo.repository" {
+    interface TradeEventMongoRepository <<MongoDB>>
+    interface TradeViewMongoRepository <<MongoDB>>
   }
 }
 
