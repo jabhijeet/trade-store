@@ -660,3 +660,109 @@ Expected outcome:
 Swagger UI listing every endpoint and calling it with a pasted token, an integration test showing the document is
 public while the endpoints still require a token, and documentation that matches the new structure.
 ```
+
+### 21 October 2026
+
+#### Architecture documentation (branch `feature/architecture`)
+
+Documentation only; no production code changed. The branch was created by the AI on request.
+
+Prompt 1: documentation baseline
+
+```text
+Context:
+The package reorganisation and Swagger are merged into feature/refactorAndOrganize. Before the architecture is
+taken further, the documentation must be an accurate baseline.
+
+Ask:
+Create a branch feature/architecture. Check README, docs/architecture.md, the diagrams and this document against the
+code, and report what is stale or missing. Do not change anything until I choose the scope.
+
+Expected outcome:
+A short list of documentation gaps grounded in the code, and options for what to update first.
+```
+
+Prompt 2: high-level design diagram
+
+```text
+Context:
+The component view (component.puml) is accurate but dense. Reviewers need one picture that explains the system in
+a minute.
+
+Ask:
+Draw a high-level design diagram in PlantUML. Kafka ingestion and REST API ingestion are two separate boxes that
+both feed the Trade Processing Service as the central box, which writes to the database, drawn as a cylinder.
+Show the outbox relay as a sidecar next to the store. Then add every part that exists in the code and is missing
+from the picture: the scheduled jobs, the dead-letter topic, the outward publishing to MongoDB and trade-status,
+the token issuer, the read side and observability. Render it to check the layout before linking it from
+docs/architecture.md.
+
+Expected outcome:
+docs/diagrams/design.puml, rendered without errors, readable left to right, and complete against the code.
+Any difference between the picture and the implementation (the relay currently runs in-process) called out.
+```
+
+Prompt 3: target architecture (v2)
+
+```text
+Context:
+v1 is functionally complete. The next review is with enterprise architecture, who will assess it for production
+at scale.
+
+Ask:
+Review the current architecture as an enterprise architect: scalability, resiliency, observability and monitoring,
+security, and delivery and operations. Propose a v2 target architecture that keeps the core invariants (Kafka first
+with REST as backup, one processing service as the single writer, the transactional outbox) and changes how the
+system is deployed, scaled and observed. Draw it as design-v2.puml and write it up in docs/architecture-v2.md with
+the trade-offs and an incremental migration path. Mark it clearly as a proposal.
+
+Example:
+The outbox relay runs as a single active instance under ShedLock; v2 should remove that bottleneck rather than add
+instances around it.
+
+Expected outcome:
+A v2 diagram that renders legibly, a summary table of v1 versus v2 per area, explicit trade-offs, and a migration
+in which every step is independently deployable and reversible.
+```
+
+Prompt 4: observability and failure handling
+
+```text
+Context:
+docs/architecture.md lists the metrics but not how they are produced, and the error-handling policy describes
+outcomes per ingestion path, not per failed dependency. Operations needs both.
+
+Ask:
+Document how metrics and observability are implemented today: where each metric is produced, how it is exposed,
+what is not wired up yet, and which signal shows which symptom. Then document failure handling as separate sections
+for PostgreSQL down, Kafka down, MongoDB down and application instance down. Derive every statement from the code,
+not from the existing documentation, and correct the documentation where the two disagree.
+
+Expected outcome:
+An observability section and one failure section per dependency covering ingestion, queries, the outbox relay, the
+scheduled jobs, health and startup, with a list of gaps where the behaviour falls short of the documented policy.
+```
+
+Prompt 5: exception matrix and closing the gaps in v2
+
+```text
+Context:
+The failure sections describe behaviour, but a reviewer cannot see which exception is raised and whether the code
+handles it.
+
+Ask:
+For every component that can be down, state explicitly which exceptions reach application code, whether each is
+handled, and if so by which class; if not, what the framework does by default and what the caller sees. Add one
+table of every exception handler in the application. Then update the v2 architecture, its document and its
+diagram, so that each gap found has a defined handling, an owner, and a note on whether it can be fixed in v1
+already.
+
+Example:
+A PostgreSQL connection failure on the REST path raises CannotCreateTransactionException, which is not a
+DataAccessException, so RestExceptionHandler does not turn it into a 503.
+
+Expected outcome:
+Per-dependency exception tables (exception, handled by, result), a single exception-handler table, a gap list,
+and a v2 failure-handling section and diagram that close every gap. Statements not proven by a test are reported
+as such.
+```

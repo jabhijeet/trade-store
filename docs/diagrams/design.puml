@@ -1,0 +1,82 @@
+@startuml design
+title Trade Store - High-Level Design
+
+left to right direction
+skinparam defaultTextAlignment center
+skinparam rectangle {
+  RoundCorner 10
+}
+skinparam database {
+  BackgroundColor #EAF2FB
+}
+
+actor "Trade Producers" as producers
+actor "Clients" as clients
+actor "Downstream\nConsumers" as downstream
+actor "Operations\n(monitoring, log shipping)" as ops
+
+queue "Kafka\ntrades\n(key = trade id)" as tradesTopic
+queue "Kafka\ntrades-dlt" as dltTopic
+queue "Kafka\ntrade-status" as statusTopic
+
+node "OAuth2 Issuer\n(Keycloak locally)" as issuer
+
+rectangle "Kafka Ingestion\n(primary)\n--\nTradeConsumer\nschema + key checks\nretry with backoff, ack after commit" as kafkaIngestion #FFF4DC
+rectangle "REST API Ingestion\n(backup / direct)\n--\nPOST /api/v1/trades\nJWT scope trades:write\nrate limit per client (Bucket4j)\nsize limit, Idempotency-Key" as restIngestion #FFF4DC
+
+rectangle "**Trade Processing Service**\n--\nidempotency check (processed_message)\nlock current trade (SELECT ... FOR UPDATE)\nrun validation rules\nstore trade + outbox event\nrecord rejections\n(one transaction)" as processing #DCEFE0
+
+rectangle "Validation Rules\n--\nMaturityDateRule\nVersionRule\n(pluggable TradeValidationRule)" as rules #DCEFE0
+
+rectangle "Expiry Scheduler\n(daily 00:05 UTC, ShedLock)\n--\nmark matured trades expired\n+ EXPIRED outbox event" as expiry #F0E6F7
+
+rectangle "Purge Job\n(daily 00:30 UTC, ShedLock)\n--\ndelete processed_message\nolder than 14 days" as purge #F0E6F7
+
+database "PostgreSQL\n--\ntrades\nprocessed_message\noutbox_event\nshedlock" as postgres
+
+rectangle "Outbox Relay\n<<sidecar>>\n--\npolls outbox_event\ndelivers each destination independently\nmarks mongo / kafka delivered" as relay #F0E6F7
+
+database "MongoDB\n--\ntrade_events (history)\ntrade_views (by book)" as mongo
+
+rectangle "Trade Query API\n(read only)\n--\nGET /api/v1/trades...\nGET /api/v1/books/{bookId}/trades\nJWT scope trades:read\nOpenAPI + Swagger UI" as queryApi #E6EEF7
+
+rectangle "Observability\n--\nActuator health / metrics\nMicrometer tradestore.* metrics\noutbox backlog gauge\nECS JSON logs" as observability #EEEEEE
+
+' Ingestion
+producers --> tradesTopic : publish trade
+producers --> restIngestion : HTTP POST
+tradesTopic --> kafkaIngestion : ordered per partition
+kafkaIngestion --> dltTopic : invalid messages,\nretries exhausted
+kafkaIngestion --> processing : TradeCommand\n(kafka:topic:partition:offset)
+restIngestion --> processing : TradeCommand\n(rest:Idempotency-Key)
+restIngestion ..> issuer : verify JWT (JWKS)
+
+' Processing and storage
+processing --> rules
+processing --> postgres : write trade + outbox event
+expiry --> postgres : update expired + outbox event
+purge --> postgres : delete old idempotency records
+
+' Outward publishing
+postgres --> relay : pending outbox events
+relay --> mongo : history + views
+relay --> statusTopic : EXPIRED events
+statusTopic --> downstream
+
+' Reads
+clients --> queryApi
+queryApi ..> issuer : verify JWT (JWKS)
+queryApi --> postgres : current state
+queryApi --> mongo : history, by book
+
+' Monitoring
+ops --> observability : scrape metrics,\nship logs
+
+note bottom of relay
+  Runs beside the application as a sidecar:
+  it shares only the outbox_event table,
+  so delivery to MongoDB and Kafka never
+  blocks or fails trade processing.
+end note
+
+@enduml

@@ -1,0 +1,97 @@
+@startuml design-v2
+title Trade Store - Target Architecture (v2)
+
+left to right direction
+skinparam defaultTextAlignment center
+skinparam packageStyle rectangle
+skinparam rectangle {
+  RoundCorner 10
+}
+skinparam database {
+  BackgroundColor #EAF2FB
+}
+
+legend top left
+  Colours: yellow = ingestion, green = processing, purple = event delivery and jobs,
+  blue = read side, grey = platform. All services run on Kubernetes across 3 AZs and
+  export traces, metrics and logs to the OpenTelemetry Collector.
+endlegend
+
+actor "Trade Producers" as producers
+actor "Clients" as clients
+
+rectangle "API Gateway + WAF\n--\nOAuth2 / JWT validation (IdP JWKS)\nglobal rate limit per client\nrequest size limit, TLS" as gateway #FFF4DC
+queue "Kafka trades\n--\nkey = trade id\nSchema Registry\nRF 3, 3 AZs" as tradesTopic
+
+rectangle "Kafka Ingestion\n--\nautoscaled on lag (KEDA)\nup to partition count\nDB connection failure:\nretry without time limit" as kafkaIngestion #FFF4DC
+rectangle "REST Ingestion\n--\nbackup / direct path\nIdempotency-Key\nany DB failure:\n503 + Retry-After" as restIngestion #FFF4DC
+queue "Kafka trades-dlt" as dltTopic
+rectangle "DLT Replay Tool\n--\ninspect, fix, re-publish\nDLT metrics + alerts" as replay #EEEEEE
+
+rectangle "**Trade Processing Service**\n--\nidempotency, row lock\nvalidation rules\ntrade + outbox event\n(one transaction)\nlock / statement timeouts" as processing #DCEFE0
+rectangle "Scheduled Jobs\n(Kubernetes CronJob)\n--\nexpiry + EXPIRED event\ndrop old partitions\nretry with backoff, alert" as jobs #F0E6F7
+
+database "PostgreSQL primary\n+ sync standby\n(via PgBouncer)\n--\ntrades\nprocessed_message (partitioned)\noutbox_event" as pgPrimary
+database "PostgreSQL\nread replicas" as pgReplica
+
+rectangle "Debezium CDC\n(Kafka Connect)\n--\noutbox event router" as cdc #F0E6F7
+queue "Kafka trade-events\n--\nall events, key = trade id" as eventsTopic
+rectangle "Projection Service\n--\nidempotent by event id\nversion-guarded views\npoison messages to DLT" as projector #F0E6F7
+queue "Kafka trade-events-dlt" as eventsDltTopic
+database "MongoDB replica set\n--\ntrade_events\ntrade_views" as mongo
+actor "Downstream\nConsumers" as downstream
+
+rectangle "Trade Query Service\n(CQRS read side)\n--\nGET /api/v1/...\nexpiry check at read time\nMongoDB circuit breaker:\nfast 503 when down" as queryService #E6EEF7
+
+package "Observability" {
+  rectangle "OTel Collector\n--\ntrace context in Kafka\nheaders and outbox events" as otel #EEEEEE
+  rectangle "Prometheus + Grafana\nTempo, Elastic / Loki\n--\nSLOs: ingest latency,\nconsumer / CDC / projection lag" as backends #EEEEEE
+  rectangle "Alertmanager\n--\nburn-rate alerts\nto on-call" as alerting #EEEEEE
+}
+
+package "Platform and security" {
+  rectangle "Vault / KMS\nsecrets, rotation" as vault #EEEEEE
+  rectangle "Service mesh\nmTLS, timeouts" as mesh #EEEEEE
+  rectangle "GitOps (Argo CD)\ncanary, Terraform" as gitops #EEEEEE
+}
+
+package "DR region (warm standby)" {
+  rectangle "MirrorMaker 2 (Kafka)\nPostgreSQL async replica\nMongoDB secondary\n--\nRPO minutes, RTO < 1 h" as drStack #EEEEEE
+}
+
+' Ingestion
+producers --> tradesTopic : publish
+producers --> gateway : POST
+clients --> gateway : GET
+gateway --> restIngestion
+tradesTopic --> kafkaIngestion
+kafkaIngestion --> dltTopic : invalid /\nexhausted
+dltTopic --> replay
+kafkaIngestion --> processing
+restIngestion --> processing
+
+' Write side
+processing --> pgPrimary : write
+jobs --> pgPrimary
+pgPrimary --> pgReplica : streaming\nreplication
+
+' Event delivery
+pgPrimary --> cdc : WAL (outbox_event)
+cdc --> eventsTopic
+eventsTopic --> projector
+projector --> mongo
+projector --> eventsDltTopic : poison\nmessages
+eventsDltTopic --> replay
+eventsTopic --> downstream
+
+' Read side
+gateway --> queryService
+queryService --> pgReplica : current state
+queryService --> mongo : history, by book
+
+' Cross-cutting
+otel --> backends
+backends --> alerting
+pgPrimary ..> drStack : async replication
+
+@enduml

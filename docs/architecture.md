@@ -27,6 +27,8 @@ The PlantUML source for every diagram lives in [`diagrams/`](diagrams):
 
 | Diagram | File |
 |---------|------|
+| High-level design | [`design.puml`](diagrams/design.puml) |
+| Target architecture, v2 (proposal, see [architecture-v2.md](architecture-v2.md)) | [`design-v2.puml`](diagrams/design-v2.puml) |
 | Component view | [`component.puml`](diagrams/component.puml) |
 | Trade ingestion sequence (Kafka) | [`sequence-ingestion.puml`](diagrams/sequence-ingestion.puml) |
 | Trade ingestion sequence (REST) | [`sequence-rest-ingestion.puml`](diagrams/sequence-rest-ingestion.puml) |
@@ -71,7 +73,8 @@ A thin adapter (`TradeConsumer`). It reads the record value as a string, parses 
 | Body without `Content-Length` | `411 Length Required` |
 | Body larger than `trade-store.rest.max-request-size` (16 KB) | `413 Content Too Large` |
 | Rate limit exceeded | `429 Too Many Requests` with `Retry-After` |
-| Database unavailable | `503 Service Unavailable` with `Retry-After` |
+| Transient database failure (lock or query timeout, concurrent first insert of a trade id) | `503 Service Unavailable` with `Retry-After: 5` |
+| Database unreachable (no connection within 5 s) | `500 Internal Server Error` (see §6.1) |
 
 Errors are returned as RFC 9457 problem details by `RestExceptionHandler`.
 
@@ -156,11 +159,25 @@ The REST API is described by an OpenAPI 3 document at `/v3/api-docs` and can be 
   Topics are created by the platform team when ACLs are enforced, because the application is not granted `Create`.
 - **Secrets** – credentials are supplied through environment variables (`POSTGRES_PASSWORD`, `MONGODB_URI`, …) and never committed to the repository.
 
-### 2.12 Monitoring
+### 2.12 Monitoring and Observability
 
-Spring Boot Actuator exposes `health` and `info` (public) and `metrics` (any valid token, §2.11), including the connection pool metrics (`hikaricp.connections.*`, `mongodb.driver.pool.*`). Logs carry the trade id and message id of every stored, rejected or duplicate trade.
+Observability today consists of Micrometer metrics, structured logs and Actuator health checks. There is no distributed tracing and no metrics export to a monitoring backend yet; [architecture-v2.md §4](architecture-v2.md#4-observability-and-monitoring) proposes both.
 
-Application metrics (`TradeMetrics`, `OutboxBacklogMetrics`):
+#### How metrics are produced
+
+All metrics go into the Micrometer `MeterRegistry` that Spring Boot Actuator creates (`spring-boot-starter-actuator`). Three kinds of metric feed it:
+
+1. **Application counters** – `TradeMetrics` (package `observability`) is a Spring bean that the services call at the point where something happens:
+   - `TradeProcessingService` calls `tradeProcessed(source, outcome)` for every message. The call is registered as an after-commit transaction callback, so a transaction that is rolled back and retried is counted once, and a rejection is counted only once its rejection record has committed. Duplicates are counted with outcome `DUPLICATE`.
+   - `ExpiryScheduler` calls `tradesExpired(n)` after each batch, `ProcessedMessagePurgeScheduler` calls `processedMessagesPurged(n)`, and `IngestionLimitInterceptor` calls `rateLimited()` for every `429`.
+2. **Application gauge** – `OutboxBacklogMetrics` implements Micrometer's `MeterBinder` and registers `tradestore.outbox.pending` twice, tagged `destination=mongodb` and `destination=kafka`. A gauge is evaluated when it is read, so each read runs a `COUNT` on `outbox_event` that is backed by the destination's partial index. When PostgreSQL is down the read fails and Micrometer reports `NaN`.
+3. **Built-in metrics** registered automatically by Spring Boot: HTTP server requests (`http.server.requests`), JVM and process metrics, the HikariCP pool (`hikaricp.connections.*`), the MongoDB driver pool (`mongodb.driver.pool.*`), Kafka client metrics including consumer lag (`kafka.consumer.*`), Kafka listener timings and scheduled task executions.
+
+#### How metrics are read
+
+Actuator exposes the registry at `/actuator/metrics` and `/actuator/metrics/{name}?tag=key:value` (JSON, pull-based, requires any valid JWT, §2.11). No Prometheus or OTLP registry is on the classpath, so metrics are not scraped or pushed anywhere; adding `micrometer-registry-prometheus` (and exposing `prometheus`) is the step that connects them to Prometheus and Grafana.
+
+Application metrics:
 
 | Metric | Type | Meaning |
 |--------|------|---------|
@@ -171,7 +188,25 @@ Application metrics (`TradeMetrics`, `OutboxBacklogMetrics`):
 | `tradestore.outbox.pending` | Gauge, tag `destination` (`mongodb`, `kafka`) | Outbox events not yet delivered; a growing value means a destination is down or the relay is behind |
 | `kafka.consumer.fetch.manager.records.lag.max` | Gauge | Consumer lag, published by the Kafka client through Spring Boot's Micrometer integration |
 
-Logs are structured JSON in Elastic Common Schema (`logging.structured.format.console: ecs`), so log shippers can index them without parsing.
+#### Logs
+
+Logs are structured JSON in Elastic Common Schema (`logging.structured.format.console: ecs`), so log shippers can index them without parsing. Every stored, rejected or duplicate trade is logged with its trade id and message id. Delivery failures in the outbox relay are logged at `WARN` with the outbox event id and trade id, transient database failures on the REST path at `WARN`, and each scheduled job logs a summary line when it completes (`expiredTrades=`, `purgedRecords=`).
+
+#### Health
+
+`/actuator/health` is public and reports only the overall status. It includes Spring Boot's PostgreSQL (`db`) and MongoDB (`mongo`) health indicators, so it returns `503` with status `DOWN` when either database is unreachable; Spring Boot has no Kafka health indicator. On Kubernetes, Spring Boot also exposes `/actuator/health/liveness` and `/actuator/health/readiness`, which do not include the databases. Use those for the probes, so that a database outage does not cause pod restarts.
+
+#### What to watch
+
+| Symptom | Metric or signal |
+|---------|------------------|
+| Kafka ingestion falling behind or stalled (for example PostgreSQL down) | `kafka.consumer.fetch.manager.records.lag.max` rising |
+| MongoDB or Kafka delivery stopped | `tradestore.outbox.pending{destination=...}` rising |
+| Unusual rejection rate | `tradestore.trades.processed{outcome=REJECTED_*}` |
+| A noisy REST producer | `tradestore.rest.rate.limited` |
+| Messages dead-lettered | records arriving on `trades-dlt` (no metric yet) |
+| PostgreSQL pool exhausted | `hikaricp.connections.pending` > 0, `hikaricp.connections.timeout` rising |
+| Expiry job did not run | no `Expiry run completed` log line after 00:05 UTC; `tradestore.trades.expired` flat |
 
 ## 3. Data Model
 
@@ -284,10 +319,124 @@ Together they represent the sample table: current state plus history. Trades suc
 | Message cannot be deserialized or has an unknown schema version | Sent to the dead-letter topic, offset committed | `400 Bad Request` |
 | Business rejection (`TradeRejectedException`) | **Not retried.** Rejection recorded (§2.5), offset committed | `409` or `422` |
 | Duplicate message id | Recorded outcome reused, offset committed | Recorded outcome returned |
-| Transient failure (database unavailable, lock timeout, primary key race on a new trade id) | Retried with exponential backoff (1 s doubling to 60 s, for up to 10 minutes). The partition is not skipped, so per-trade ordering is preserved; consumer lag grows | `503 Service Unavailable` with `Retry-After`, caller retries |
+| Transient failure (database unavailable, lock timeout, primary key race on a new trade id) | Retried with exponential backoff (1 s doubling to 60 s, for up to 10 minutes). The partition is not skipped, so per-trade ordering is preserved; consumer lag grows | Lock or query timeout and the primary key race: `503 Service Unavailable` with `Retry-After`, caller retries. Database unreachable: `500` (§6.1) |
 | Unexpected error after retries are exhausted | Sent to the dead-letter topic with the exception details | `500 Internal Server Error` |
 
-Business rejections are excluded from retries (configured as not-retryable in Spring Kafka's `DefaultErrorHandler`), so a rejected trade never blocks the trades behind it on the same partition.
+Business rejections are excluded from retries (configured as not-retryable in Spring Kafka's `DefaultErrorHandler`), so a rejected trade never blocks the trades behind it on the same partition. Every other exception on the Kafka path is retried, whatever its type.
+
+The sections below describe what happens when each dependency is unavailable. In every case, no trade is lost and no state is half-written: a trade, its outbox event and its idempotency record commit together or not at all (§2.5), and every delivery after the commit is retried and idempotent.
+
+Each table lists, per component, the exception that reaches application code, whether it is handled and by which class, and the result. "Not handled" means no application class catches it: it propagates to the framework, which applies its default behaviour (named in the table). §6.6 lists every exception handler in one place.
+
+### 6.1 PostgreSQL down
+
+PostgreSQL holds the authoritative state, so nothing can be written while it is down. HikariCP waits `connection-timeout` (5 s) for a connection and then fails with `SQLTransientConnectionException`. Which Spring exception the application sees depends on where the connection is needed:
+
+- at the start of a transaction (every `@Transactional` method and every Spring Data repository call): `CannotCreateTransactionException` (package `org.springframework.transaction`; it is **not** a `DataAccessException`);
+- when an open connection is lost inside a transaction: `DataAccessResourceFailureException` (a non-transient `DataAccessException`);
+- in ShedLock, which uses `JdbcTemplate`: `CannotGetJdbcConnectionException`.
+
+A lock wait or a slow statement would raise `CannotAcquireLockException` or `QueryTimeoutException` (both `TransientDataAccessException`), but only if PostgreSQL's `lock_timeout` or `statement_timeout` is set; `application.yml` sets neither, so by default a blocked row lock waits indefinitely.
+
+| Component | Exception | Handled? By | Result |
+|-----------|-----------|-------------|--------|
+| Kafka ingestion (`TradeConsumer` → `TradeProcessingService.process`) | `CannotCreateTransactionException`, `DataAccessResourceFailureException` | **Handled** by `DefaultErrorHandler` (bean in `KafkaConfig`). Neither exception is in its not-retryable list, so the record is retried with backoff (1 s doubling to 60 s). After 10 minutes, `DeadLetterPublishingRecoverer` (also in `KafkaConfig`) publishes the record to `trades-dlt`. | The partition waits and consumer lag grows; per-trade order is kept. An outage longer than 10 minutes dead-letters about one record per partition every 10 minutes. Re-publishing them after recovery is safe, because processing is idempotent and version-checked. |
+| REST ingestion (`TradeIngestionController`) | `TransientDataAccessException` and subclasses: lock or statement timeout, and the `ConcurrencyFailureException` that `TradeProcessingService.save` throws for a concurrent first insert | **Handled** by `RestExceptionHandler.handleTransientDataAccess` | `503 Service Unavailable` with `Retry-After: 5`, logged at `WARN`. |
+| REST ingestion (`TradeIngestionController`) | `CannotCreateTransactionException`, `DataAccessResourceFailureException` | **Not handled.** `RestExceptionHandler` has no handler for them, and its base class `ResponseEntityExceptionHandler` covers only Spring MVC exceptions. They fall through to Spring Boot's default error handling. | `500 Internal Server Error` after the 5 s connection timeout. |
+| Query API, current state (`TradeQueryController` → `TradeQueryService`) | `CannotCreateTransactionException`, `DataAccessResourceFailureException` | **Not handled** (as above). | `500`. |
+| Query API, history and by-book | none: these read MongoDB | – | Keep working, serving data up to the last delivered event. |
+| Outbox relay, reading pending events (`OutboxRelay.deliverPendingEvents`) | `CannotCreateTransactionException` | **Not handled** by `OutboxRelay`, which only catches failures of the MongoDB and Kafka deliveries. It propagates out of the `@Scheduled` method, and Spring's scheduler error handler logs it at `ERROR` and suppresses it. | Poll skipped; the next poll (1 s later) tries again. |
+| Outbox relay, marking an event delivered (`markMongoDelivered`, `markKafkaDelivered`) | `CannotCreateTransactionException`, `DataAccessResourceFailureException` | **Not handled** (as above). | The poll stops; the event was delivered but not marked, so it is delivered again on a later poll. Both destinations are idempotent for redelivery (§6.3, §10). |
+| Expiry and purge jobs (`ExpiryScheduler`, `ProcessedMessagePurgeScheduler`) | `CannotGetJdbcConnectionException` from ShedLock, or `CannotCreateTransactionException` from a batch | **Not handled** by the jobs; logged and suppressed by Spring's scheduler error handler. | The run stops; batches committed before the failure are kept. The next attempt is the next daily run, which catches up because expiry is idempotent (`maturity_date < today`), so trades are marked expired up to one day late. There is no manual trigger; restarting with `TRADE_STORE_EXPIRY_CRON` set to run sooner is the workaround. |
+| Outbox backlog gauge (`OutboxBacklogMetrics`) | `CannotCreateTransactionException` from the count query | **Handled** by Micrometer, which catches exceptions thrown by a gauge function | `tradestore.outbox.pending` reads `NaN`. |
+| Health (`/actuator/health`) | – | **Handled** by Spring Boot's `DataSourceHealthIndicator` | Status `DOWN`, HTTP `503`. |
+| Application start | Liquibase exception, wrapped in `BeanCreationException` | **Not handled**, on purpose: startup fails fast | The application does not start until PostgreSQL is back. |
+
+### 6.2 Kafka down
+
+Kafka is the primary ingestion path and the destination of status events. The REST path does not depend on it.
+
+| Component | Exception | Handled? By | Result |
+|-----------|-----------|-------------|--------|
+| Producers | – | – | Cannot publish to `trades`; this is the case the REST endpoint exists for. Producers switch to `POST /api/v1/trades`. |
+| Kafka consumer, fetching | none reaches application code | **Handled** inside the Kafka client, which logs connection warnings and reconnects with its own backoff | Consumption pauses and resumes from the last committed offset. |
+| Kafka consumer, committing the offset after the transaction committed | `org.apache.kafka.common.errors.TimeoutException` or `CommitFailedException` | **Handled** by the Spring Kafka listener container, which logs the failure | The record is delivered again after recovery. `TradeProcessingService.process` finds its message id in `processed_message` and returns the recorded outcome without writing anything; the metric counts it as `DUPLICATE`. |
+| Dead-letter publishing (`DeadLetterPublishingRecoverer`) | `KafkaException` when the dead-letter send fails | **Handled** by `DefaultErrorHandler`: a failed recovery leaves the record uncommitted, so it is retried | The record is not lost. |
+| Outbox relay, Kafka destination (`OutboxRelay.deliverToKafka`) | `ExecutionException` (wrapping the producer's `TimeoutException` when no broker answers), `java.util.concurrent.TimeoutException` (the relay's 10 s wait), Spring's `KafkaException`, `InterruptedException` | **Handled** by `OutboxRelay.deliverToKafka`, which logs at `WARN` and stops Kafka deliveries for that poll | The event stays pending and `tradestore.outbox.pending{destination=kafka}` grows. Events are delivered in order once Kafka is back. A send that timed out may still have reached Kafka, so `trade-status` is at-least-once and consumers deduplicate by `eventId`. |
+| Outbox relay, MongoDB destination | none | – | Still delivered, because each destination is read and marked separately. Both are delivered on one scheduler thread with a fixed delay, though, so each poll waits for the Kafka timeout: 10 s, or up to the producer's `max.block.ms` (60 s) if the topic metadata is not cached. MongoDB then receives one batch (200 events) per 10–60 s instead of per second. |
+| REST ingestion | none | – | Unaffected: trades are written to PostgreSQL and their events wait in the outbox. |
+| Application start | topic creation fails in `KafkaAdmin` | **Handled** by Spring Kafka's `KafkaAdmin`, which logs the error (`fatalIfBrokerNotAvailable` is `false`) | The application starts; the consumer keeps reconnecting. |
+
+### 6.3 MongoDB down
+
+MongoDB is not on the write path, so ingestion is unaffected. History and views fall behind until it is back. The driver waits for its server selection timeout (30 s by default, not configured) and throws `MongoTimeoutException`, which Spring Data translates into a `DataAccessException` (`DataAccessResourceFailureException`).
+
+| Component | Exception | Handled? By | Result |
+|-----------|-----------|-------------|--------|
+| Kafka and REST ingestion | none | – | Unaffected. |
+| Outbox relay, MongoDB destination (`TradeEventMongoRepository.save`, `TradeViewProjector.apply`) | `DataAccessResourceFailureException` | **Handled** by `OutboxRelay.deliverToMongo`, which catches every `DataAccessException`, logs at `WARN` and stops MongoDB deliveries for that poll. `TradeViewProjector` itself catches only `DuplicateKeyException`, which is its version guard, not a failure. | Events stay pending and `tradestore.outbox.pending{destination=mongodb}` grows. After recovery they are upserted with the outbox event id as `_id`, and view updates are version-guarded, so redelivery never duplicates history or moves a view backwards. |
+| Outbox relay, Kafka destination | none | – | Still delivered, but each poll first waits for the 30 s MongoDB timeout, so status events are published about every 30 s. |
+| Query API, history and by-book (`TradeQueryService` → `TradeEventMongoRepository`, `TradeViewMongoRepository`) | `DataAccessResourceFailureException` | **Not handled**: `RestExceptionHandler` handles only `TransientDataAccessException`, and this one is non-transient | `500` after the 30 s timeout. |
+| Query API, current state | none: reads PostgreSQL | – | Unaffected. |
+| Health | – | **Handled** by Spring Boot's `MongoHealthIndicator` | Status `DOWN`, HTTP `503`. |
+| Application start (`MongoLiquibaseMigration.afterPropertiesSet`) | Liquibase exception, wrapped in `BeanCreationException` | **Not handled**, on purpose: startup fails fast | The application does not start. Set `trade-store.mongodb.liquibase.enabled=false` to start without MongoDB once the schema is in place. |
+
+### 6.4 Application instance down
+
+Instances share no in-memory state except the rate-limiter buckets, so losing an instance loses no data. The crashed instance raises nothing; the effects show up in the components that remain.
+
+| Component | Exception | Handled? By | Result |
+|-----------|-----------|-------------|--------|
+| In-flight transaction | none | **Handled** by PostgreSQL, which rolls back the open transaction | Nothing is half-written. |
+| Kafka ingestion on the remaining instances | `CommitFailedException` if a rebalance happens while a record is being processed | **Handled** by the Spring Kafka listener container | The crashed instance's partitions are reassigned after the consumer session times out. Uncommitted records are delivered again; those already committed are answered from `processed_message` by `TradeProcessingService.process`. |
+| REST clients | connection reset, seen by the client | Not visible to the application | A retry with the same `Idempotency-Key` returns the original outcome; a retry without a key is applied again, which for the same version is a harmless `REPLACED`. |
+| Outbox relay | none | ShedLock: the `outbox-relay` lock expires after `lockAtMostFor` (10 minutes) | Delivery pauses for up to 10 minutes, then another instance takes over. Events delivered but not yet marked are delivered again, idempotently. |
+| Expiry and purge jobs | none | ShedLock, as above | Batches already committed are kept; the rest is done by the next daily run. |
+| All instances down | – | – | Kafka keeps the published trades (7 days' retention) and consumption resumes from the committed offsets. The REST endpoint is unavailable. |
+
+### 6.5 OAuth2 issuer down
+
+The application validates JWTs locally with the issuer's public keys, which the JWT decoder fetches on the first request and caches. While the issuer is down, requests keep working as long as the keys are cached. Kafka ingestion, the outbox relay and the scheduled jobs do not use the issuer, so producers that cannot obtain a token can publish to Kafka instead.
+
+| Component | Exception | Handled? By | Result |
+|-----------|-----------|-------------|--------|
+| REST, keys not cached or unknown key id | `JwtException` from the decoder when it cannot fetch the keys, which `JwtAuthenticationProvider` turns into `AuthenticationServiceException` | **Not handled** by the application. Spring Security treats it as a server-side failure, not a bad token, and does not map it to `401`. | `500` until the issuer is reachable again. |
+| REST, invalid or expired token | `InvalidBearerTokenException` | **Handled** by Spring Security's `BearerTokenAuthenticationEntryPoint` | `401` with `WWW-Authenticate: Bearer error="invalid_token"`. |
+
+### 6.6 Exception handlers in one place
+
+| Exception | Raised by | Handled by | Result |
+|-----------|-----------|------------|--------|
+| `LowerVersionTradeException` | `VersionRule` | REST: `RestExceptionHandler.handleLowerVersion`. Kafka: `TradeConsumer.onTrade` (logs, completes normally) | REST `409`. Kafka: offset committed, partition not blocked |
+| `MaturityDateInPastException` | `MaturityDateRule` | REST: `RestExceptionHandler.handleMaturityDateInPast`. Kafka: `TradeConsumer.onTrade` | REST `422`. Kafka: offset committed |
+| `InvalidTradeMessageException` | `TradeConsumer` (bad JSON, schema version, fields, key) | `DefaultErrorHandler` in `KafkaConfig`: not retryable, recovered by `DeadLetterPublishingRecoverer` | Published to `trades-dlt` immediately |
+| Invalid REST body (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`) | Spring MVC | `ResponseEntityExceptionHandler`, the base class of `RestExceptionHandler` | `400` problem detail |
+| `RateLimitExceededException` | `IngestionLimitInterceptor` | `RestExceptionHandler.handleRateLimitExceeded` | `429` with `Retry-After` |
+| `TradeNotFoundException` | `TradeQueryController` | `RestExceptionHandler.handleTradeNotFound` | `404` |
+| `DataIntegrityViolationException` (unique violation on a new trade id) | `tradeRepository.saveAndFlush` | `TradeProcessingService.save`, which rethrows it as `ConcurrencyFailureException` | Treated as transient, see next row |
+| `TransientDataAccessException` (incl. `ConcurrencyFailureException`, `QueryTimeoutException`, `CannotAcquireLockException`) | JPA / JDBC | REST: `RestExceptionHandler.handleTransientDataAccess`. Kafka: `DefaultErrorHandler` | REST `503` with `Retry-After: 5`. Kafka: retried with backoff |
+| `DuplicateKeyException` | `TradeViewProjector` (stale event) | `TradeViewProjector.apply` | Stale event ignored; the view keeps the newer version |
+| `DataAccessException` while delivering to MongoDB | MongoDB repositories, `MongoTemplate` | `OutboxRelay.deliverToMongo` | Event left pending, retried next poll |
+| Kafka send failures (`ExecutionException`, `TimeoutException`, `KafkaException`, `InterruptedException`) | `KafkaTemplate` | `OutboxRelay.deliverToKafka` | Event left pending, retried next poll |
+| Any other exception on the Kafka path | anything below `TradeConsumer` | `DefaultErrorHandler` | Retried for 10 minutes, then `trades-dlt` |
+| **Not handled:** `CannotCreateTransactionException`, `DataAccessResourceFailureException` (PostgreSQL or MongoDB) on the REST path | JPA, MongoDB repositories | Spring Boot default error handling | `500` |
+| **Not handled:** `AuthenticationServiceException` (issuer unreachable) | Spring Security | Spring Security rethrows it | `500` |
+| **Not handled:** any exception in a scheduled job or in the outbox relay outside the two delivery methods | `ExpiryScheduler`, `ProcessedMessagePurgeScheduler`, `OutboxRelay` | Spring's scheduler error handler | Logged at `ERROR`; the run or poll is abandoned |
+| **Not handled:** `JacksonException` when an outbox payload cannot be parsed (`OutboxRelay.toDocument`) | `JsonMapper` | Spring's scheduler error handler | That event fails on every poll and blocks MongoDB delivery behind it. Payloads are written by the application itself, so this needs a defect to happen. |
+
+### 6.7 Known gaps
+
+- **Database unreachable on the REST path returns `500`, not `503`** (§6.1, §6.3). Mapping `CannotCreateTransactionException` and `DataAccessResourceFailureException` to `503` with `Retry-After` in `RestExceptionHandler` would tell callers to retry.
+- **No `lock_timeout` or `statement_timeout`.** A request blocked on a row lock waits indefinitely, and the `503` path for lock timeouts is never taken.
+- **Long PostgreSQL outages dead-letter Kafka records** after 10 minutes per record (§6.1). A longer or unlimited retry window for connection failures would keep them on the partition instead.
+- **One slow destination slows the other in the outbox relay**, because both are delivered on the same scheduler thread (§6.2, §6.3).
+- **MongoDB reads hang for 30 s** before failing, because the server selection timeout is the driver default.
+- **A failed daily job waits a day** for its next run (§6.1).
+- **An unreachable OAuth2 issuer returns `500`, not `503`** (§6.5).
+- **An outbox event with an unreadable payload blocks MongoDB delivery** (§6.6).
+- **No metric or alert for the dead-letter topic.**
+
+[architecture-v2.md §9](architecture-v2.md#9-failure-handling) describes how the target architecture closes each gap.
 
 ## 7. Validation Rules Mapping
 
